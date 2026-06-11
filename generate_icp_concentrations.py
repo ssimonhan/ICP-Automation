@@ -1,0 +1,430 @@
+﻿"""Generate an ICP concentration workbook from an edited <initials> ICP sheet."""
+
+from __future__ import annotations
+
+__author__ = "Shihua Han"
+__version__ = "0.1.0"
+
+import argparse
+import re
+import subprocess
+import warnings
+from collections import OrderedDict
+from copy import copy
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Border, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+
+DEFAULT_SOURCE_SHEET_NAME = "SH ICP"
+OUTPUT_SHEET_NAME = "ICP concentrations"
+HEADER_ROW = 1
+DATA_START_ROW = 3
+ELEMENT_START_COL = 4
+
+OUTLINE_SIDE = Side(style="thin", color="808080")
+FILL_GOLD = PatternFill("solid", fgColor="FFD966")
+EXCEL_FILL_GREEN = 13561798
+EXCEL_FILL_ORANGE = 14083324
+EXCEL_FILL_GREY = 14277081
+EXCEL_ICP_RANGE_FILL = 13693658
+
+warnings.filterwarnings(
+    "ignore",
+    message="Unknown extension is not supported and will be removed",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message="Conditional Formatting extension is not supported and will be removed",
+    category=UserWarning,
+)
+
+
+def normalize(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def parse_number(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+
+    text = str(value).strip().replace(",", "")
+    if not text or text.upper() in {"N/A", "NA", "NULL", "NONE"}:
+        return None
+    if text.startswith("<"):
+        text = text[1:].strip()
+
+    match = re.search(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)
+    return float(match.group(0)) if match else None
+
+
+def copy_cell_style(source, target) -> None:
+    if source.has_style:
+        target.font = copy(source.font)
+        target.fill = copy(source.fill)
+        target.border = copy(source.border)
+        target.alignment = copy(source.alignment)
+        target.number_format = source.number_format
+        target.protection = copy(source.protection)
+
+
+def copy_cell(source, target) -> None:
+    target.value = source.value
+    copy_cell_style(source, target)
+    if source.comment:
+        target.comment = copy(source.comment)
+
+
+def apply_outline_border(output_ws, first_row: int, last_row: int, first_col: int, last_col: int) -> None:
+    """Apply only the outside border around a rectangular section."""
+
+    for row in range(first_row, last_row + 1):
+        for col in range(first_col, last_col + 1):
+            cell = output_ws.cell(row, col)
+            existing = cell.border
+            cell.border = Border(
+                left=OUTLINE_SIDE if col == first_col else existing.left,
+                right=OUTLINE_SIDE if col == last_col else existing.right,
+                top=OUTLINE_SIDE if row == first_row else existing.top,
+                bottom=OUTLINE_SIDE if row == last_row else existing.bottom,
+                diagonal=existing.diagonal,
+                diagonal_direction=existing.diagonal_direction,
+                diagonalUp=existing.diagonalUp,
+                diagonalDown=existing.diagonalDown,
+                outline=existing.outline,
+                vertical=existing.vertical,
+                horizontal=existing.horizontal,
+            )
+
+
+def read_groups(source_ws) -> tuple[list[str], OrderedDict[str, list[dict[str, object]]]]:
+    elements = [normalize(source_ws.cell(HEADER_ROW, col).value) for col in range(ELEMENT_START_COL, source_ws.max_column + 1)]
+    groups: OrderedDict[str, list[dict[str, object]]] = OrderedDict()
+    current_sample = ""
+
+    for row_idx in range(DATA_START_ROW, source_ws.max_row + 1):
+        sample_name = normalize(source_ws.cell(row_idx, 3).value)
+        if not sample_name:
+            continue
+
+        sample = normalize(source_ws.cell(row_idx, 2).value) or current_sample
+        if sample:
+            current_sample = sample
+        else:
+            sample = "Unspecified sample"
+
+        groups.setdefault(sample, []).append(
+            {
+                "source_row": row_idx,
+                "dilution": parse_number(source_ws.cell(row_idx, 1).value),
+                "sample": sample,
+                "sample_name": sample_name,
+                "ppb_values": [
+                    parse_number(source_ws.cell(row_idx, col).value)
+                    for col in range(ELEMENT_START_COL, source_ws.max_column + 1)
+                ],
+            }
+        )
+
+    return elements, groups
+
+
+def selected_index(ppb_values: list[float | None]) -> int | None:
+    indexed = [(idx, value) for idx, value in enumerate(ppb_values) if value is not None]
+    if not indexed:
+        return None
+
+    valid_10_400 = [(idx, value) for idx, value in indexed if 10 <= value <= 400]
+    if valid_10_400:
+        return max(valid_10_400, key=lambda item: item[1])[0]
+
+    valid_1_10 = [(idx, value) for idx, value in indexed if 1 <= value < 10]
+    if valid_1_10:
+        return max(valid_1_10, key=lambda item: item[1])[0]
+
+    if all(value < 1 for _, value in indexed):
+        return max(indexed, key=lambda item: item[1])[0]
+
+    if all(value > 400 for _, value in indexed):
+        return min(indexed, key=lambda item: item[1])[0]
+
+    return None
+
+
+def write_header(output_ws, source_ws, output_row: int, elements: list[str]) -> None:
+    for col in range(1, ELEMENT_START_COL):
+        copy_cell(source_ws.cell(HEADER_ROW, col), output_ws.cell(output_row, col))
+    for offset, element in enumerate(elements):
+        col = ELEMENT_START_COL + offset
+        copy_cell_style(source_ws.cell(HEADER_ROW, col), output_ws.cell(output_row, col))
+        output_ws.cell(output_row, col).value = element
+
+
+def write_sample_block(
+    output_ws,
+    source_ws,
+    start_row: int,
+    sample: str,
+    rows: list[dict[str, object]],
+    elements: list[str],
+) -> tuple[int, list[int], tuple[int, int, int, int, int]]:
+    title_row = start_row
+    header_row = start_row + 1
+    ppb_start = header_row + 1
+    ppm_start = ppb_start + len(rows)
+    selected_row = ppm_start + len(rows)
+    last_col = ELEMENT_START_COL + len(elements) - 1
+    data_bar_rows: list[int] = []
+
+    output_ws.cell(title_row, 1, sample)
+    output_ws.cell(title_row, 1).font = copy(source_ws.cell(HEADER_ROW, 1).font)
+
+    write_header(output_ws, source_ws, header_row, elements)
+
+    for offset, row in enumerate(rows):
+        out_row = ppb_start + offset
+        source_row = int(row["source_row"])
+        for col in range(1, output_ws.max_column + 1):
+            copy_cell(source_ws.cell(source_row, col), output_ws.cell(out_row, col))
+        data_bar_rows.append(out_row)
+
+    for offset, row in enumerate(rows):
+        out_row = ppm_start + offset
+        source_ppb_row = ppb_start + offset
+        output_ws.cell(out_row, 1, row["dilution"])
+        output_ws.cell(out_row, 2, sample if offset == 0 else None)
+        output_ws.cell(out_row, 3, row["sample_name"])
+        for col in range(1, ELEMENT_START_COL):
+            copy_cell_style(source_ws.cell(int(row["source_row"]), col), output_ws.cell(out_row, col))
+
+        for element_offset, _ in enumerate(elements):
+            col = ELEMENT_START_COL + element_offset
+            col_letter = get_column_letter(col)
+            output_ws.cell(out_row, col, f"={col_letter}{source_ppb_row}/1000*$A{out_row}")
+            copy_cell_style(source_ws.cell(int(row["source_row"]), col), output_ws.cell(out_row, col))
+            output_ws.cell(out_row, col).fill = PatternFill(fill_type=None)
+        data_bar_rows.append(out_row)
+
+    output_ws.cell(selected_row, 1, "Selected concentration (ppm)")
+    output_ws.cell(selected_row, 2, sample)
+    for col in range(1, ELEMENT_START_COL):
+        copy_cell_style(source_ws.cell(HEADER_ROW, col), output_ws.cell(selected_row, col))
+        output_ws.cell(selected_row, col).fill = FILL_GOLD
+
+    ppb_by_element = list(zip(*[row["ppb_values"] for row in rows]))
+    for element_offset, ppb_values in enumerate(ppb_by_element):
+        col = ELEMENT_START_COL + element_offset
+        selected_idx = selected_index(list(ppb_values))
+        selected_cell = output_ws.cell(selected_row, col)
+        copy_cell_style(source_ws.cell(HEADER_ROW, col), selected_cell)
+        selected_cell.fill = FILL_GOLD
+
+        if selected_idx is None:
+            selected_cell.value = None
+            continue
+
+        ppm_row = ppm_start + selected_idx
+        col_letter = get_column_letter(col)
+        selected_cell.value = f"={col_letter}{ppm_row}"
+
+    apply_outline_border(output_ws, header_row, header_row, 1, last_col)
+    apply_outline_border(output_ws, ppb_start, ppb_start + len(rows) - 1, 1, last_col)
+    apply_outline_border(output_ws, ppm_start, ppm_start + len(rows) - 1, 1, last_col)
+    apply_outline_border(output_ws, selected_row, selected_row, 1, last_col)
+    section = (ppb_start, ppb_start + len(rows) - 1, ppm_start, ppm_start + len(rows) - 1, selected_row)
+    return selected_row + 2, data_bar_rows, section
+
+
+def apply_excel_formatting(
+    workbook_path: Path,
+    sheet_name: str,
+    rows: list[int],
+    selection_sections: list[tuple[int, int, int, int, int]],
+    first_col: int,
+    last_col: int,
+) -> bool:
+    workbook_literal = str(workbook_path.resolve()).replace("'", "''")
+    sheet_literal = sheet_name.replace("'", "''")
+    first_col_letter = get_column_letter(first_col)
+    last_col_letter = get_column_letter(last_col)
+    row_list = ",".join(str(row) for row in rows)
+    section_list = ",".join(f"'{ppb_start},{ppb_end},{ppm_start},{ppm_end},{selected_row}'" for ppb_start, ppb_end, ppm_start, ppm_end, selected_row in selection_sections)
+
+    script = f"""
+$excel = $null
+$workbook = $null
+try {{
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $workbook = $excel.Workbooks.Open('{workbook_literal}')
+    $sheet = $workbook.Worksheets.Item('{sheet_literal}')
+    $rows = @({row_list})
+    foreach ($row in $rows) {{
+        $rangeAddress = '{first_col_letter}' + $row + ':{last_col_letter}' + $row
+        $range = $sheet.Range($rangeAddress)
+        $bar = $range.FormatConditions.AddDatabar()
+        $bar.AxisPosition = 0
+        $bar.PercentMin = 0
+        $bar.PercentMax = 100
+        $bar.BarColor.Color = 13998939
+        $bar.NegativeBarFormat.ColorType = 0
+        $bar.NegativeBarFormat.Color.Color = 255
+        $bar.ShowValue = $true
+    }}
+    $sections = @({section_list})
+    foreach ($section in $sections) {{
+        $parts = $section.Split(',')
+        $ppbStart = [int]$parts[0]
+        $ppbEnd = [int]$parts[1]
+        $ppmStart = [int]$parts[2]
+        $ppmEnd = [int]$parts[3]
+        $selectedRow = [int]$parts[4]
+        $ppbSectionRange = $sheet.Range('{first_col_letter}' + $ppbStart + ':{last_col_letter}' + $ppbEnd)
+        $ppbHighlightRule = $ppbSectionRange.FormatConditions.Add(1, 1, '=10', '=400')
+        $ppbHighlightRule.Interior.Color = {EXCEL_ICP_RANGE_FILL}
+        for ($col = {first_col}; $col -le {last_col}; $col++) {{
+            $colLetter = [string]$sheet.Cells.Item(1, $col).Address($false, $false)
+            $colLetter = $colLetter -replace '1$', ''
+            $ppbRange = $colLetter + '$' + $ppbStart + ':' + $colLetter + '$' + $ppbEnd
+            $topPpbCell = $colLetter + $ppbStart
+            $ppmRange = $sheet.Range($colLetter + $ppmStart + ':' + $colLetter + $ppmEnd)
+            $selectedCell = $sheet.Range($colLetter + $selectedRow)
+
+            $formulaGreen = '=AND(' + $topPpbCell + '>=10,' + $topPpbCell + '<=400,' + $topPpbCell + '=MAXIFS(' + $ppbRange + ',' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400"))'
+            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreen)
+            $rule.Interior.Color = {EXCEL_FILL_GREEN}
+
+            $formulaOrange = '=AND(COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")=0,' + $topPpbCell + '>=1,' + $topPpbCell + '<10,' + $topPpbCell + '=MAXIFS(' + $ppbRange + ',' + $ppbRange + ',">=1",' + $ppbRange + ',"<10"))'
+            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaOrange)
+            $rule.Interior.Color = {EXCEL_FILL_ORANGE}
+
+            $formulaGreyLow = '=AND(MAX(' + $ppbRange + ')<1,' + $topPpbCell + '=MAX(' + $ppbRange + '))'
+            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreyLow)
+            $rule.Interior.Color = {EXCEL_FILL_GREY}
+
+            $formulaGreyHigh = '=AND(MIN(' + $ppbRange + ')>400,' + $topPpbCell + '=MIN(' + $ppbRange + '))'
+            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreyHigh)
+            $rule.Interior.Color = {EXCEL_FILL_GREY}
+
+            $formulaSelectedGreen = '=COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")>0'
+            $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedGreen)
+            $rule.Interior.Color = {EXCEL_FILL_GREEN}
+
+            $formulaSelectedOrange = '=AND(COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")=0,COUNTIFS(' + $ppbRange + ',">=1",' + $ppbRange + ',"<10")>0)'
+            $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedOrange)
+            $rule.Interior.Color = {EXCEL_FILL_ORANGE}
+
+            $formulaSelectedGrey = '=OR(MAX(' + $ppbRange + ')<1,MIN(' + $ppbRange + ')>400)'
+            $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedGrey)
+            $rule.Interior.Color = {EXCEL_FILL_GREY}
+        }}
+    }}
+    $workbook.Save()
+    exit 0
+}} catch {{
+    Write-Error $_.Exception.Message
+    exit 1
+}} finally {{
+    if ($workbook -ne $null) {{ $workbook.Close($true) }}
+    if ($excel -ne $null) {{ $excel.Quit() }}
+}}
+"""
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        print("WARNING: Excel data bars could not be applied.")
+        if result.stderr.strip():
+            print(result.stderr.strip())
+        return False
+    return True
+
+
+def resolve_source_sheet(source_wb, requested_sheet: str | None) -> str:
+    """Find the ICP sheet to read, optionally honoring an exact user request."""
+
+    if requested_sheet:
+        if requested_sheet not in source_wb.sheetnames:
+            available = ", ".join(source_wb.sheetnames)
+            raise ValueError(f'Sheet "{requested_sheet}" was not found. Available sheets: {available}')
+        return requested_sheet
+
+    icp_sheets = [name for name in source_wb.sheetnames if name.upper().endswith(" ICP")]
+    if len(icp_sheets) == 1:
+        return icp_sheets[0]
+    if DEFAULT_SOURCE_SHEET_NAME in source_wb.sheetnames:
+        return DEFAULT_SOURCE_SHEET_NAME
+    if icp_sheets:
+        available = ", ".join(icp_sheets)
+        raise ValueError(f"Multiple ICP sheets found ({available}). Use --sheet to choose one.")
+
+    available = ", ".join(source_wb.sheetnames)
+    raise ValueError(f'No sheet ending with " ICP" was found. Available sheets: {available}')
+
+
+def build_concentration_workbook(source_path: Path, output_path: Path, source_sheet_name: str | None = None) -> None:
+    source_wb = load_workbook(source_path, data_only=False)
+    resolved_source_sheet = resolve_source_sheet(source_wb, source_sheet_name)
+    source_ws = source_wb[resolved_source_sheet]
+    elements, groups = read_groups(source_ws)
+
+    output_wb = Workbook()
+    output_ws = output_wb.active
+    output_ws.title = OUTPUT_SHEET_NAME
+    output_ws.freeze_panes = "D3"
+
+    for col_idx in range(1, source_ws.max_column + 1):
+        letter = get_column_letter(col_idx)
+        output_ws.column_dimensions[letter].width = source_ws.column_dimensions[letter].width or 14
+
+    current_row = 1
+    data_bar_rows: list[int] = []
+    selection_sections: list[tuple[int, int, int, int, int]] = []
+    for sample, rows in groups.items():
+        current_row, block_data_bar_rows, section = write_sample_block(output_ws, source_ws, current_row, sample, rows, elements)
+        data_bar_rows.extend(block_data_bar_rows)
+        selection_sections.append(section)
+
+    output_wb.save(output_path)
+    excel_formatting_applied = apply_excel_formatting(
+        output_path,
+        OUTPUT_SHEET_NAME,
+        data_bar_rows,
+        selection_sections,
+        ELEMENT_START_COL,
+        ELEMENT_START_COL + len(elements) - 1,
+    )
+
+    print(f"Concentration workbook saved: {output_path}")
+    print(f"Source ICP sheet used: {resolved_source_sheet}")
+    print(f"Sample groups written: {len(groups)}")
+    print(f"Elements written: {len(elements)}")
+    print(f"Excel conditional formatting applied: {'yes' if excel_formatting_applied else 'no'}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Generate original-solution ICP concentration workbook from an ICP sheet.")
+    parser.add_argument("--source", type=Path, required=True, help='Workbook containing an "<initials> ICP" sheet')
+    parser.add_argument("--output", type=Path, required=True, help="Output concentration workbook")
+    parser.add_argument(
+        "--sheet",
+        help='Source ICP sheet name, such as "SH ICP", "T ICP", or "H ICP". If omitted, the only "* ICP" sheet is used.',
+    )
+    args = parser.parse_args()
+
+    build_concentration_workbook(args.source, args.output, args.sheet)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
