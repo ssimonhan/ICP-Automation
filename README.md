@@ -7,11 +7,11 @@ Version: 0.2.0
 
 ---
 
-# Overview
+## Overview
 
 This project provides two ways to use the ICP processing pipeline:
 
-## 1. Streamlit App (Recommended)
+### 1. Streamlit App (Recommended)
 A user-friendly web interface that:
 - Uploads raw ICP files
 - Generates cleaned ICP sheets
@@ -19,31 +19,31 @@ A user-friendly web interface that:
 - Produces final concentration results
 - Eliminates manual Excel editing steps
 
-## 2. Command-Line Scripts
+### 2. Command-Line Scripts
 Traditional workflow using:
 - `process_icp_data.py`
 - `generate_icp_concentrations.py`
 
 ---
 
-# Installation
+## Installation
 
-## Requirements
+### Requirements
 - Python 3.8+
 - (Optional) Microsoft Excel for full formatting support
 
-## Install dependencies
+### Install dependencies
 ```bash
 pip install -r requirements.txt
 ```
 
 ---
 
-# Running the Streamlit App (Recommended)
+## Running the Streamlit App (Recommended)
 
-## Start the app
+### Start the app
 
-### Step 1 — Open a terminal
+#### Step 1 — Open a terminal
 
 Navigate to the project folder:
 
@@ -57,7 +57,7 @@ For example (Windows):
 cd C:\Users\YourName\ICP-Automation
 ```
 
-### Step 2 — (Optional) Activate your environment
+#### Step 2 — (Optional) Activate your environment
 
 If using virtual environment:
 
@@ -72,19 +72,19 @@ If using virtual environment:
 source .venv/bin/activate
 ```
 
-### Step 3 — Install dependencies (first time only)
+#### Step 3 — Install dependencies (first time only)
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4 — Start the app
+#### Step 4 — Start the app
 
 ```bash
 python -m streamlit run app.py
 ```
 
-### Step 5 — Open in browser
+#### Step 5 — Open in browser
 
 After running, you should see something like:
 
@@ -98,7 +98,7 @@ Open that URL in your browser:
 http://localhost:8501
 ```
 
-### Step 6 — Stop the app
+#### Step 6 — Stop the app
 
 To stop the app, go back to the terminal and press:
 
@@ -108,21 +108,21 @@ Ctrl + C
 
 ---
 
-## Streamlit Workflow (Fully Automated)
+### Streamlit Workflow (Fully Automated)
 
-### Step 1 — Upload raw ICP file
+#### Step 1 — Upload raw ICP file
 - Accepts .csv or .xlsx
 - Generates a cleaned ICP workbook
 - Optional: download intermediate cleaned file
 
-### Step 2 — Edit data in-app
+#### Step 2 — Edit data in-app
 - Editable table appears
 - Modify:
   - Dilution (Column A)
   - Sample (Column B)
 - Sample Name (Column C) is preserved
 
-### Step 3 — Generate final results
+#### Step 3 — Generate final results
 - Runs concentration calculations automatically
 - Produces final Excel workbook
 
@@ -130,16 +130,16 @@ No manual Excel editing required
 
 ---
 
-## Outputs
+### Outputs
 
-### Intermediate output (optional)
+#### Intermediate output (optional)
 - Cleaned ICP workbook
 - Includes:
   - raw data
   - cleaned data
   - <initials> ICP sheet
 
-### Final output
+#### Final output
 - Concentration workbook:
   - grouped by sample
   - ppm calculations
@@ -147,7 +147,7 @@ No manual Excel editing required
 
 ---
 
-## Excel Formatting Notes
+### Excel Formatting Notes
 
 - Full formatting requires Microsoft Excel
 - Without Excel:
@@ -156,15 +156,15 @@ No manual Excel editing required
 
 ---
 
-# Command-Line Workflow (Optional)
+## Command-Line Workflow (Optional)
 
-## Step 1
+### Step 1
 
 ```bash
 python process_icp_data.py input.xlsx --initials SH --output SH_processed.xlsx
 ```
 
-## Step 2
+### Step 2
 
 ```bash
 python generate_icp_concentrations.py --source SH_processed.xlsx --output SH_concentrations.xlsx
@@ -174,7 +174,7 @@ Manual editing required in CLI mode
 
 ---
 
-# Key Features
+## Key Features
 
 - Automated ICP preprocessing
 - Editable in-app workflow
@@ -183,7 +183,7 @@ Manual editing required in CLI mode
 
 ---
 
-# Optional Launcher (Windows)
+## Optional Launcher (Windows)
 
 ```bat
 @echo off

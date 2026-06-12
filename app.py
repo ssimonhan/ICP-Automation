@@ -49,7 +49,7 @@ if uploaded_file and st.button("Step 1: Generate ICP Sheet"):
     # Save path
     st.session_state.mid_path = str(mid_path)
 
-    # ✅ Store file bytes persistently
+    # Store file bytes persistently
     with open(mid_path, "rb") as f:
         st.session_state.cleaned_file = f.read()
 
@@ -57,7 +57,7 @@ if uploaded_file and st.button("Step 1: Generate ICP Sheet"):
     
     st.session_state.pop("final_file", None)
 
-# ✅ ALWAYS show download button if file exists
+# ALWAYS show download button if file exists
 if "cleaned_file" in st.session_state:
     st.download_button(
         "⬇️ Download Cleaned ICP File",
@@ -106,7 +106,7 @@ if st.session_state.mid_path:
 
     edited_df = st.data_editor(
         df,
-        use_container_width=True,
+        width='stretch',
         disabled=["Row", "Sample Name"],  # prevent breaking keys        
         column_config={
             "Dilution": st.column_config.NumberColumn("Dilution", step=1)
@@ -152,7 +152,7 @@ if st.session_state.mid_path:
 
         st.success("✅ Final concentrations generated!")
 
-# ✅ Persistent download button
+# Persistent download button
 if "final_file" in st.session_state:
     st.download_button(
         "⬇️ Download Final Excel",
