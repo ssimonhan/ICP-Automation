@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterable, NamedTuple
 
 import pandas as pd
+from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import DataBarRule
 from openpyxl.comments import Comment
@@ -583,6 +584,37 @@ try {{
             print(result.stderr.strip())
         return False
     return True
+    
+
+def apply_openpyxl_data_bars_fallback(
+    workbook_path: Path,
+    sheet_name: str,
+    first_row: int,
+    last_row: int,
+    first_col: int,
+    last_col: int,
+) -> bool:
+    """
+    Cloud-safe fallback using openpyxl only.
+    Approximates Excel 'Automatic' min/max data bars.
+    """
+    wb = load_workbook(workbook_path)
+    ws = wb[sheet_name]
+
+    for row in range(first_row, last_row + 1):
+        start = f"{get_column_letter(first_col)}{row}"
+        end = f"{get_column_letter(last_col)}{row}"
+
+        rule = DataBarRule(
+            start_type="min",
+            end_type="max",
+            color="5B9BD5",
+            showValue=True,
+        )
+        ws.conditional_formatting.add(f"{start}:{end}", rule)
+
+    wb.save(workbook_path)
+    return True
 
 
 def default_output_path(input_path: Path, sample_initials: str) -> Path:
@@ -622,14 +654,24 @@ def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str
 
     save_path = output_path or default_output_path(input_path, sample_initials)
     wb.save(save_path)
-    automatic_bars_applied = apply_excel_automatic_data_bars(
-        save_path,
-        icp_ws.title,
-        first_row=PROCESSED_DATA_START_ROW,
-        last_row=icp_ws.max_row,
-        first_col=PROCESSED_TABLE_START_COL,
-        last_col=icp_ws.max_column,
-    )
+    if excel_backend() == "windows":
+        automatic_bars_applied = apply_excel_automatic_data_bars(
+            save_path,
+            sheet_name=icp_ws.title,
+            first_row=PROCESSED_DATA_START_ROW,
+            last_row=icp_ws.max_row,
+            first_col=PROCESSED_TABLE_START_COL,
+            last_col=icp_ws.max_column,
+        )
+    else:
+        automatic_bars_applied = apply_openpyxl_data_bars_fallback(
+            save_path,
+            sheet_name=icp_ws.title,
+            first_row=PROCESSED_DATA_START_ROW,
+            last_row=icp_ws.max_row,
+            first_col=PROCESSED_TABLE_START_COL,
+            last_col=icp_ws.max_column,
+        )
 
     print(f"Processed element count: {len(validation.element_blocks)}")
     print(f"{sample_initials} sample rows kept: {len(validation.sh_row_indices)}")

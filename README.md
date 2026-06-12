@@ -17,7 +17,8 @@ A user-friendly web interface that:
 - Generates cleaned ICP sheets
 - Allows editing dilution/sample directly in-browser
 - Produces final concentration results
-- Eliminates manual Excel editing steps
+- Eliminates manual Excel editing steps  
+This app is compatible with Streamlit Cloud. Some advanced Excel formatting features (e.g., Excel-native automatic data bars) are simplified in cloud environments due to platform limitations, but all core data processing and outputs remain unchanged.
 
 ### 2. Command-Line Scripts
 Traditional workflow using:

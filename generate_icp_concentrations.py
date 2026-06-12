@@ -13,9 +13,11 @@ from collections import OrderedDict
 from copy import copy
 from pathlib import Path
 
+from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Border, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.formatting.rule import DataBarRule
 
 
 DEFAULT_SOURCE_SHEET_NAME = "SH ICP"
@@ -372,6 +374,31 @@ def resolve_source_sheet(source_wb, requested_sheet: str | None) -> str:
     raise ValueError(f'No sheet ending with " ICP" was found. Available sheets: {available}')
 
 
+def apply_openpyxl_formatting_fallback(
+    workbook_path: Path,
+    sheet_name: str,
+    rows: list[int],
+    first_col: int,
+    last_col: int,
+) -> bool:
+    wb = load_workbook(workbook_path)
+    ws = wb[sheet_name]
+
+    for row in rows:
+        start = f"{get_column_letter(first_col)}{row}"
+        end = f"{get_column_letter(last_col)}{row}"
+        rule = DataBarRule(
+            start_type="min",
+            end_type="max",
+            color="5B9BD5",
+            showValue=True,
+        )
+        ws.conditional_formatting.add(f"{start}:{end}", rule)
+
+    wb.save(workbook_path)
+    return True
+
+
 def build_concentration_workbook(source_path: Path, output_path: Path, source_sheet_name: str | None = None) -> None:
     source_wb = load_workbook(source_path, data_only=False)
     resolved_source_sheet = resolve_source_sheet(source_wb, source_sheet_name)
@@ -396,14 +423,23 @@ def build_concentration_workbook(source_path: Path, output_path: Path, source_sh
         selection_sections.append(section)
 
     output_wb.save(output_path)
-    excel_formatting_applied = apply_excel_formatting(
-        output_path,
-        OUTPUT_SHEET_NAME,
-        data_bar_rows,
-        selection_sections,
-        ELEMENT_START_COL,
-        ELEMENT_START_COL + len(elements) - 1,
-    )
+    if excel_backend() == "windows":
+        excel_formatting_applied = apply_excel_formatting(
+            output_path,
+            OUTPUT_SHEET_NAME,
+            data_bar_rows,
+            selection_sections,
+            ELEMENT_START_COL,
+            ELEMENT_START_COL + len(elements) - 1,
+        )
+    else:
+        excel_formatting_applied = apply_openpyxl_formatting_fallback(
+            output_path,
+            OUTPUT_SHEET_NAME,
+            data_bar_rows,
+            ELEMENT_START_COL,
+            ELEMENT_START_COL + len(elements) - 1,
+        )
 
     print(f"Concentration workbook saved: {output_path}")
     print(f"Source ICP sheet used: {resolved_source_sheet}")

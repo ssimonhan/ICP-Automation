@@ -9,10 +9,17 @@ from openpyxl import load_workbook
 
 from process_icp_data import process_icp_file
 from generate_icp_concentrations import build_concentration_workbook
+from excel_backend import excel_backend
 
 st.set_page_config(page_title="ICP Automation", layout="wide")
 
 st.title("🧪 ICP Automation Tool (Editable Workflow)")
+
+if excel_backend() == "cloud":
+    st.info(
+        "ℹ️ Running in cloud mode. "
+        "Excel automatic formatting is approximated for compatibility."
+    )
 
 uploaded_file = st.file_uploader("Upload ICP export", type=["csv", "xlsx"])
 initials = st.text_input("Sample initials", value="SH")
