@@ -1,9 +1,202 @@
-# ICP Data Processing Scripts
+# ICP Automation
 
-Python scripts for processing fixed-template ICP export files into cleaned Excel workbooks and original-solution concentration summaries.
+Python tools and a Streamlit app for processing fixed-template ICP export files into cleaned Excel workbooks and final concentration summaries.
 
 Author: Shihua Han  
-Version: 0.1.0
+Version: 0.2.0  
+
+---
+
+# Overview
+
+This project provides two ways to use the ICP processing pipeline:
+
+## 1. Streamlit App (Recommended)
+A user-friendly web interface that:
+- Uploads raw ICP files
+- Generates cleaned ICP sheets
+- Allows editing dilution/sample directly in-browser
+- Produces final concentration results
+- Eliminates manual Excel editing steps
+
+## 2. Command-Line Scripts
+Traditional workflow using:
+- `process_icp_data.py`
+- `generate_icp_concentrations.py`
+
+---
+
+# Installation
+
+## Requirements
+- Python 3.8+
+- (Optional) Microsoft Excel for full formatting support
+
+## Install dependencies
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+# Running the Streamlit App (Recommended)
+
+## Start the app
+
+### Step 1 — Open a terminal
+
+Navigate to the project folder:
+
+```bash
+cd path/to/ICP-Automation
+```
+
+For example (Windows):
+
+```bash
+cd C:\Users\YourName\ICP-Automation
+```
+
+### Step 2 — (Optional) Activate your environment
+
+If using virtual environment:
+
+**Windows**
+
+```bash
+.\.venv\Scripts\activate
+```
+**Mac/Linux**
+
+```bash
+source .venv/bin/activate
+```
+
+### Step 3 — Install dependencies (first time only)
+
+```bash
+pip install -r requirements.txt
+```
+
+### Step 4 — Start the app
+
+```bash
+python -m streamlit run app.py
+```
+
+### Step 5 — Open in browser
+
+After running, you should see something like:
+
+```
+Local URL: http://localhost:8501
+```
+
+Open that URL in your browser:
+
+```
+http://localhost:8501
+```
+
+### Step 6 — Stop the app
+
+To stop the app, go back to the terminal and press:
+
+```
+Ctrl + C
+```
+
+---
+
+## Streamlit Workflow (Fully Automated)
+
+### Step 1 — Upload raw ICP file
+- Accepts .csv or .xlsx
+- Generates a cleaned ICP workbook
+- Optional: download intermediate cleaned file
+
+### Step 2 — Edit data in-app
+- Editable table appears
+- Modify:
+  - Dilution (Column A)
+  - Sample (Column B)
+- Sample Name (Column C) is preserved
+
+### Step 3 — Generate final results
+- Runs concentration calculations automatically
+- Produces final Excel workbook
+
+No manual Excel editing required
+
+---
+
+## Outputs
+
+### Intermediate output (optional)
+- Cleaned ICP workbook
+- Includes:
+  - raw data
+  - cleaned data
+  - <initials> ICP sheet
+
+### Final output
+- Concentration workbook:
+  - grouped by sample
+  - ppm calculations
+  - selected final concentrations
+
+---
+
+## Excel Formatting Notes
+
+- Full formatting requires Microsoft Excel
+- Without Excel:
+  - Calculations still work
+  - Some formatting may be missing
+
+---
+
+# Command-Line Workflow (Optional)
+
+## Step 1
+
+```bash
+python process_icp_data.py input.xlsx --initials SH --output SH_processed.xlsx
+```
+
+## Step 2
+
+```bash
+python generate_icp_concentrations.py --source SH_processed.xlsx --output SH_concentrations.xlsx
+```
+
+Manual editing required in CLI mode
+
+---
+
+# Key Features
+
+- Automated ICP preprocessing
+- Editable in-app workflow
+- Excel output generation
+- Concentration selection logic
+
+---
+
+# Optional Launcher (Windows)
+
+```bat
+@echo off
+cd /d %~dp0
+powershell -ExecutionPolicy Bypass -WindowStyle Hidden -Command "python -m streamlit run app.py"
+start http://localhost:8501
+```
+
+---
+
+# Core ICP Processing Scripts
+
+These scripts implement the underlying data processing pipeline used by the Streamlit app. They process fixed-template ICP export files into cleaned Excel workbooks and original-solution concentration summaries. They can also be run independently from the command line.
 
 The workflow uses:
 
@@ -28,12 +221,6 @@ The workflow uses:
 ```bash
 pip install pandas openpyxl
 ```
-
-## License
-
-This project is intended to be released under the GNU General Public License.
-
-Copyright (C) 2026 Shihua Han
 
 ## Input Format
 
@@ -207,6 +394,16 @@ Copied ICP ppb rows and calculated ppm rows also receive row-wise Excel data bar
 - Missing concentration values in selected sample rows are reported as warnings and left blank.
 - If Excel automation is unavailable, the workbook is still created, but native Excel data bars or some conditional formatting may not be applied.
 
-## Acknowledgments
+---
 
-* This script was developed with the assistance of OpenAI Codex to optimize the data parsing and automation workflows.
+# License
+
+This project is intended to be released under the GNU General Public License.
+
+Copyright (C) 2026 Shihua Han
+
+---
+
+# Acknowledgments
+
+* This script was developed with the assistance of OpenAI Codex and Microsoft Copilot to optimize the data parsing and automation workflows.
