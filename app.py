@@ -106,7 +106,7 @@ if st.session_state.mid_path:
 
     edited_df = st.data_editor(
         df,
-        use_container_width=True,
+        width='stretch',
         disabled=["Row", "Sample Name"],  # prevent breaking keys        
         column_config={
             "Dilution": st.column_config.NumberColumn("Dilution", step=1)
