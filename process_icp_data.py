@@ -29,7 +29,7 @@ from typing import Iterable, NamedTuple
 import pandas as pd
 from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
-from openpyxl.formatting.rule import DataBarRule
+from openpyxl.formatting.rule import DataBarRule, CellIsRule
 from openpyxl.comments import Comment
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
@@ -594,28 +594,45 @@ def apply_openpyxl_data_bars_fallback(
     first_col: int,
     last_col: int,
 ) -> bool:
-    """
-    Cloud-safe fallback using openpyxl only.
-    Approximates Excel 'Automatic' min/max data bars.
-    """
     wb = load_workbook(workbook_path)
     ws = wb[sheet_name]
 
+    # Styles
+    data_bar_rule = DataBarRule(
+        start_type="min",
+        end_type="max",
+        color="5B9BD5",
+        showValue=True,
+    )
+
+    green_fill = PatternFill(
+        start_color="C6EFCE",
+        end_color="C6EFCE",
+        fill_type="solid"
+    )
+
+    # Apply row-wise
     for row in range(first_row, last_row + 1):
         start = f"{get_column_letter(first_col)}{row}"
         end = f"{get_column_letter(last_col)}{row}"
+        cell_range = f"{start}:{end}"
 
-        rule = DataBarRule(
-            start_type="min",
-            end_type="max",
-            color="5B9BD5",
-            showValue=True,
+        # Data bars
+        ws.conditional_formatting.add(cell_range, data_bar_rule)
+
+        # 10–400 highlight
+        ws.conditional_formatting.add(
+            cell_range,
+            CellIsRule(
+                operator="between",
+                formula=["10", "400"],
+                fill=green_fill
+            )
         )
-        ws.conditional_formatting.add(f"{start}:{end}", rule)
 
     wb.save(workbook_path)
     return True
-
+    
 
 def default_output_path(input_path: Path, sample_initials: str) -> Path:
     """Return a non-destructive output filename next to the input file."""
