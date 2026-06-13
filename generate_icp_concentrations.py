@@ -378,62 +378,51 @@ def apply_openpyxl_formatting_fallback(
     workbook_path: Path,
     sheet_name: str,
     rows: list[int],
+    selection_sections,
     first_col: int,
     last_col: int,
 ) -> bool:
     wb = load_workbook(workbook_path)
     ws = wb[sheet_name]
-
-    # Styles
-    data_bar_rule = DataBarRule(
-        start_type="min",
-        end_type="max",
-        color="5B9BD5",
-        showValue=True,
-    )
+    
+    ws.conditional_formatting._cf_rules.clear()
 
     green_fill = PatternFill("solid", fgColor="C6EFCE")
     orange_fill = PatternFill("solid", fgColor="F4B183")
     grey_fill = PatternFill("solid", fgColor="D9D9D9")
     selected_fill = PatternFill("solid", fgColor="FFD966")
+        
+    for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
-    for row in rows:
-        start = f"{get_column_letter(first_col)}{row}"
-        end = f"{get_column_letter(last_col)}{row}"
-        cell_range = f"{start}:{end}"
+        range_str = (
+            f"{get_column_letter(first_col)}{ppb_start}:"
+            f"{get_column_letter(last_col)}{ppb_end}"
+        )
 
-        # Data bars
-        ws.conditional_formatting.add(cell_range, data_bar_rule)
-
-        # 10–400 green highlight
         ws.conditional_formatting.add(
-            cell_range,
+            range_str,
             CellIsRule(
                 operator="between",
                 formula=["10", "400"],
-                fill=green_fill
-            )
+                fill=green_fill,
+            ),
         )
+    
+    for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
-        # <1 grey
-        ws.conditional_formatting.add(
-            cell_range,
-            CellIsRule(
-                operator="lessThan",
-                formula=["1"],
-                fill=grey_fill
-            )
-        )
+        for row in range(ppb_start, ppb_end + 1):
+            start = f"{get_column_letter(first_col)}{row}"
+            end = f"{get_column_letter(last_col)}{row}"
+            cell_range = f"{start}:{end}"
 
-        # 1–10 orange
-        ws.conditional_formatting.add(
-            cell_range,
-            CellIsRule(
-                operator="between",
-                formula=["1", "10"],
-                fill=orange_fill
+            data_bar_rule = DataBarRule(
+                start_type="min",
+                end_type="max",
+                color="5B9BD5",
+                showValue=True,
             )
-        )
+
+            ws.conditional_formatting.add(cell_range, data_bar_rule)
 
     # Highlight "Selected concentration" rows
     for row in rows:
@@ -484,6 +473,7 @@ def build_concentration_workbook(source_path: Path, output_path: Path, source_sh
             output_path,
             OUTPUT_SHEET_NAME,
             data_bar_rows,
+            selection_sections,
             ELEMENT_START_COL,
             ELEMENT_START_COL + len(elements) - 1,
         )
