@@ -596,19 +596,21 @@ def apply_openpyxl_data_bars_fallback(
 ) -> bool:
     wb = load_workbook(workbook_path)
     ws = wb[sheet_name]
+    
+    ws.conditional_formatting._cf_rules.clear()
 
+    green_fill = PatternFill(
+        start_color="C6EFCE",
+        end_color="C6EFCE",
+        fill_type="solid"
+    )
+        
     # Styles
     data_bar_rule = DataBarRule(
         start_type="min",
         end_type="max",
         color="5B9BD5",
         showValue=True,
-    )
-
-    green_fill = PatternFill(
-        start_color="C6EFCE",
-        end_color="C6EFCE",
-        fill_type="solid"
     )
 
     # Apply row-wise
