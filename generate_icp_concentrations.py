@@ -391,22 +391,23 @@ def apply_openpyxl_formatting_fallback(
     orange_fill = PatternFill("solid", fgColor="F4B183")
     grey_fill = PatternFill("solid", fgColor="D9D9D9")
     selected_fill = PatternFill("solid", fgColor="FFD966")
-        
+    
     for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
-        range_str = (
-            f"{get_column_letter(first_col)}{ppb_start}:"
-            f"{get_column_letter(last_col)}{ppb_end}"
-        )
+        for row in range(ppb_start, ppb_end + 1):
+            for col in range(first_col, last_col + 1):
+                cell = ws.cell(row=row, column=col)
+                value = cell.value
 
-        ws.conditional_formatting.add(
-            range_str,
-            CellIsRule(
-                operator="between",
-                formula=["10", "400"],
-                fill=green_fill,
-            ),
-        )
+                if isinstance(value, (int, float)) and 10 <= value <= 400:
+                    cell.fill = green_fill
+    
+    data_bar_rule = DataBarRule(
+        start_type="min",
+        end_type="max",
+        color="5B9BD5",
+        showValue=True,
+    )
     
     for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
@@ -414,13 +415,6 @@ def apply_openpyxl_formatting_fallback(
             start = f"{get_column_letter(first_col)}{row}"
             end = f"{get_column_letter(last_col)}{row}"
             cell_range = f"{start}:{end}"
-
-            data_bar_rule = DataBarRule(
-                start_type="min",
-                end_type="max",
-                color="5B9BD5",
-                showValue=True,
-            )
 
             ws.conditional_formatting.add(cell_range, data_bar_rule)
 
