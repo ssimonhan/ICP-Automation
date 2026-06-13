@@ -391,22 +391,23 @@ def apply_openpyxl_formatting_fallback(
     orange_fill = PatternFill("solid", fgColor="F4B183")
     grey_fill = PatternFill("solid", fgColor="D9D9D9")
     selected_fill = PatternFill("solid", fgColor="FFD966")
-        
+    
     for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
-        range_str = (
-            f"{get_column_letter(first_col)}{ppb_start}:"
-            f"{get_column_letter(last_col)}{ppb_end}"
-        )
+        for row in range(ppb_start, ppb_end + 1):
+            for col in range(first_col, last_col + 1):
+                cell = ws.cell(row=row, column=col)
+                value = cell.value
 
-        ws.conditional_formatting.add(
-            range_str,
-            CellIsRule(
-                operator="between",
-                formula=["10", "400"],
-                fill=green_fill,
-            ),
-        )
+                if isinstance(value, (int, float)) and 10 <= value <= 400:
+                    cell.fill = green_fill
+    
+    data_bar_rule = DataBarRule(
+        start_type="min",
+        end_type="max",
+        color="5B9BD5",
+        showValue=True,
+    )
     
     for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
@@ -415,21 +416,57 @@ def apply_openpyxl_formatting_fallback(
             end = f"{get_column_letter(last_col)}{row}"
             cell_range = f"{start}:{end}"
 
-            data_bar_rule = DataBarRule(
-                start_type="min",
-                end_type="max",
-                color="5B9BD5",
-                showValue=True,
-            )
-
             ws.conditional_formatting.add(cell_range, data_bar_rule)
 
-    # Highlight "Selected concentration" rows
-    for row in rows:
-        label_cell = ws.cell(row=row, column=1).value
-        if isinstance(label_cell, str) and "Selected" in label_cell:
-            for col in range(1, last_col + 1):
-                ws.cell(row=row, column=col).fill = selected_fill
+    # Highlight "Selected concentration"
+    for (ppb_start, ppb_end, ppm_start, ppm_end, selected_row) in selection_sections:
+
+        for col in range(first_col, last_col + 1):
+
+            ppb_values = []
+            for r in range(ppb_start, ppb_end + 1):
+                val = ws.cell(row=r, column=col).value
+                if isinstance(val, (int, float)):
+                    ppb_values.append((r, val))
+
+            if not ppb_values:
+                continue
+
+            valid_10_400 = [(r, v) for r, v in ppb_values if 10 <= v <= 400]
+            valid_1_10 = [(r, v) for r, v in ppb_values if 1 <= v < 10]
+
+            if valid_10_400:
+                chosen_row, _ = max(valid_10_400, key=lambda x: x[1])
+                fill = green_fill
+            elif valid_1_10:
+                chosen_row, _ = max(valid_1_10, key=lambda x: x[1])
+                fill = orange_fill
+            elif all(v < 1 for _, v in ppb_values):
+                chosen_row, _ = max(ppb_values, key=lambda x: x[1])
+                fill = grey_fill
+            elif all(v > 400 for _, v in ppb_values):
+                chosen_row, _ = min(ppb_values, key=lambda x: x[1])
+                fill = grey_fill
+            else:
+                continue
+
+            ppm_row = ppm_start + (chosen_row - ppb_start)
+            ws.cell(row=ppm_row, column=col).fill = fill
+    
+    for (ppb_start, ppb_end, ppm_start, ppm_end, selected_row) in selection_sections:
+
+        # gold only for labels
+        ws.cell(row=selected_row, column=1).fill = selected_fill
+        ws.cell(row=selected_row, column=2).fill = selected_fill
+        ws.cell(row=selected_row, column=3).fill = selected_fill
+
+        # copy per-element color from PPM row
+        for col in range(first_col, last_col + 1):
+            ppm_cell = ws.cell(row=ppm_row, column=col)
+            selected_cell = ws.cell(row=selected_row, column=col)
+
+            if ppm_cell.fill and ppm_cell.fill.fill_type == "solid":
+                selected_cell.fill = copy(ppm_cell.fill)
 
     wb.save(workbook_path)
     return True
