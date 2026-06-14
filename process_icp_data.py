@@ -27,8 +27,9 @@ from pathlib import Path
 from typing import Iterable, NamedTuple
 
 import pandas as pd
+from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
-from openpyxl.formatting.rule import DataBarRule
+from openpyxl.formatting.rule import DataBarRule, CellIsRule
 from openpyxl.comments import Comment
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
@@ -583,7 +584,57 @@ try {{
             print(result.stderr.strip())
         return False
     return True
+    
 
+def apply_openpyxl_data_bars_fallback(
+    workbook_path: Path,
+    sheet_name: str,
+    first_row: int,
+    last_row: int,
+    first_col: int,
+    last_col: int,
+) -> bool:
+    wb = load_workbook(workbook_path)
+    ws = wb[sheet_name]
+    
+    ws.conditional_formatting._cf_rules.clear()
+
+    green_fill = PatternFill(
+        start_color="C6EFCE",
+        end_color="C6EFCE",
+        fill_type="solid"
+    )
+        
+    # Styles
+    data_bar_rule = DataBarRule(
+        start_type="min",
+        end_type="max",
+        color="5B9BD5",
+        showValue=True,
+    )
+
+    # Apply row-wise
+    for row in range(first_row, last_row + 1):
+        start = f"{get_column_letter(first_col)}{row}"
+        end = f"{get_column_letter(last_col)}{row}"
+        cell_range = f"{start}:{end}"
+
+        # Data bars
+        ws.conditional_formatting.add(cell_range, data_bar_rule)
+
+        # 10–400 highlight
+        ws.conditional_formatting.add(
+            cell_range,
+            CellIsRule(
+                operator="between",
+                formula=["10", "400"],
+                fill=green_fill
+            )
+        )
+
+    wb.save(workbook_path)
+    return True
+    
 
 def default_output_path(input_path: Path, sample_initials: str) -> Path:
     """Return a non-destructive output filename next to the input file."""
@@ -622,14 +673,24 @@ def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str
 
     save_path = output_path or default_output_path(input_path, sample_initials)
     wb.save(save_path)
-    automatic_bars_applied = apply_excel_automatic_data_bars(
-        save_path,
-        icp_ws.title,
-        first_row=PROCESSED_DATA_START_ROW,
-        last_row=icp_ws.max_row,
-        first_col=PROCESSED_TABLE_START_COL,
-        last_col=icp_ws.max_column,
-    )
+    if excel_backend() == "windows":
+        automatic_bars_applied = apply_excel_automatic_data_bars(
+            save_path,
+            sheet_name=icp_ws.title,
+            first_row=PROCESSED_DATA_START_ROW,
+            last_row=icp_ws.max_row,
+            first_col=PROCESSED_TABLE_START_COL,
+            last_col=icp_ws.max_column,
+        )
+    else:
+        automatic_bars_applied = apply_openpyxl_data_bars_fallback(
+            save_path,
+            sheet_name=icp_ws.title,
+            first_row=PROCESSED_DATA_START_ROW,
+            last_row=icp_ws.max_row,
+            first_col=PROCESSED_TABLE_START_COL,
+            last_col=icp_ws.max_column,
+        )
 
     print(f"Processed element count: {len(validation.element_blocks)}")
     print(f"{sample_initials} sample rows kept: {len(validation.sh_row_indices)}")
