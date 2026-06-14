@@ -392,16 +392,6 @@ def apply_openpyxl_formatting_fallback(
     grey_fill = PatternFill("solid", fgColor="D9D9D9")
     selected_fill = PatternFill("solid", fgColor="FFD966")
     
-    for (ppb_start, ppb_end, _, _, _) in selection_sections:
-
-        for row in range(ppb_start, ppb_end + 1):
-            for col in range(first_col, last_col + 1):
-                cell = ws.cell(row=row, column=col)
-                value = cell.value
-
-                if isinstance(value, (int, float)) and 10 <= value <= 400:
-                    cell.fill = green_fill
-    
     data_bar_rule = DataBarRule(
         start_type="min",
         end_type="max",
@@ -412,6 +402,13 @@ def apply_openpyxl_formatting_fallback(
     for (ppb_start, ppb_end, _, _, _) in selection_sections:
 
         for row in range(ppb_start, ppb_end + 1):
+            for col in range(first_col, last_col + 1):
+                cell = ws.cell(row=row, column=col)
+                value = cell.value
+
+                if isinstance(value, (int, float)) and 10 <= value <= 400:
+                    cell.fill = green_fill
+                    
             start = f"{get_column_letter(first_col)}{row}"
             end = f"{get_column_letter(last_col)}{row}"
             cell_range = f"{start}:{end}"
@@ -420,6 +417,8 @@ def apply_openpyxl_formatting_fallback(
 
     # Highlight "Selected concentration"
     for (ppb_start, ppb_end, ppm_start, ppm_end, selected_row) in selection_sections:
+        
+        selected_ppm_row_by_col = {}
 
         for col in range(first_col, last_col + 1):
 
@@ -452,16 +451,15 @@ def apply_openpyxl_formatting_fallback(
 
             ppm_row = ppm_start + (chosen_row - ppb_start)
             ws.cell(row=ppm_row, column=col).fill = fill
+            selected_ppm_row_by_col[col] = ppm_row
     
-    for (ppb_start, ppb_end, ppm_start, ppm_end, selected_row) in selection_sections:
-
         # gold only for labels
         ws.cell(row=selected_row, column=1).fill = selected_fill
         ws.cell(row=selected_row, column=2).fill = selected_fill
         ws.cell(row=selected_row, column=3).fill = selected_fill
-
+        
         # copy per-element color from PPM row
-        for col in range(first_col, last_col + 1):
+        for col, ppm_row in selected_ppm_row_by_col.items():
             ppm_cell = ws.cell(row=ppm_row, column=col)
             selected_cell = ws.cell(row=selected_row, column=col)
 
