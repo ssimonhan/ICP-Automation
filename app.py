@@ -13,7 +13,7 @@ from excel_backend import excel_backend
 
 st.set_page_config(page_title="ICP Automation", layout="wide")
 
-st.title("🧪 ICP Automation Tool (Editable Workflow)")
+st.title("🧪 ICP Automation Tool")
 
 if excel_backend() == "cloud":
     st.info(
