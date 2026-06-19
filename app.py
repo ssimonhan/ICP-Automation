@@ -7,7 +7,8 @@ from io import BytesIO
 import pandas as pd
 from openpyxl import load_workbook
 
-from process_icp_data import process_icp_file
+from calibration_settings import CalibrationRange, HighlightThresholds
+from process_icp_data import normalize_sample_initials, process_icp_file
 from generate_icp_concentrations import build_concentration_workbook
 from excel_backend import excel_backend
 
@@ -23,6 +24,77 @@ if excel_backend() == "cloud":
 
 uploaded_file = st.file_uploader("Upload ICP export", type=["csv", "xlsx"])
 initials = st.text_input("Sample initials", value="SH")
+
+with st.expander("Advanced settings"):
+    col1, col2 = st.columns(2)
+    with col1:
+        st.caption("Customize ppb ranges used for ICP highlighting and final concentration selection.")
+        orange_min = st.number_input(
+            "Orange range minimum ppb",
+            min_value=0.0,
+            value=1.0,
+            step=0.1,
+            help="Values from this number up to the green minimum are lower-confidence and highlighted orange.",
+        )
+        green_min = st.number_input(
+            "Green range minimum ppb",
+            min_value=0.0,
+            value=10.0,
+            step=1.0,
+            help="Values from this number through the green maximum are treated as accurate.",
+        )
+        green_max = st.number_input(
+            "Green range maximum ppb",
+            min_value=0.0,
+            value=400.0,
+            step=10.0,
+            help="Values greater than this are outside the accurate range.",
+        )
+    with col2:
+        st.caption("Customize internal-standard and blank-sample warning thresholds.")
+        internal_light_orange = st.number_input(
+            "Internal standard tolerance before orange (%)",
+            min_value=0.0,
+            value=20.0,
+            step=1.0,
+        )
+        internal_orange = st.number_input(
+            "Internal standard orange threshold (%)",
+            min_value=0.0,
+            value=40.0,
+            step=1.0,
+            help="Values above this threshold are highlighted dark orange.",
+        )
+        blank_light_orange = st.number_input(
+            "Blank sample tolerance before orange (ppb)",
+            min_value=0.0,
+            value=0.2,
+            step=0.1,
+        )
+        blank_orange = st.number_input(
+            "Blank sample orange threshold (ppb)",
+            min_value=0.0,
+            value=1.0,
+            step=0.1,
+            help="Values above this threshold are highlighted dark orange.",
+        )
+
+try:
+    sample_initials = normalize_sample_initials(initials)
+    calibration_range = CalibrationRange(
+        orange_min=orange_min,
+        green_min=green_min,
+        green_max=green_max,
+    )
+    highlight_thresholds = HighlightThresholds(
+        internal_light_orange=internal_light_orange,
+        internal_orange=internal_orange,
+        blank_light_orange=blank_light_orange,
+        blank_orange=blank_orange,
+    )
+except ValueError as exc:
+    st.error(f"Settings error: {exc}")
+    st.stop()
 
 # Store intermediate file path
 if "mid_path" not in st.session_state:
@@ -48,7 +120,9 @@ if uploaded_file and st.button("Step 1: Generate ICP Sheet"):
             input_path=input_path,
             output_path=mid_path,
             sheet_name=None,
-            sample_initials=initials
+            sample_initials=sample_initials,
+            calibration_range=calibration_range,
+            highlight_thresholds=highlight_thresholds,
         )
 
         os.remove(input_path)
@@ -151,7 +225,8 @@ if st.session_state.mid_path:
             build_concentration_workbook(
                 source_path=Path(st.session_state.mid_path),
                 output_path=output_path,
-                source_sheet_name=icp_sheet_name
+                source_sheet_name=icp_sheet_name,
+                calibration_range=calibration_range,
             )
 
         with open(output_path, "rb") as f:

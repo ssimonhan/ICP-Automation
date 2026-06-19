@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 import argparse
 import re
@@ -13,6 +13,7 @@ from collections import OrderedDict
 from copy import copy
 from pathlib import Path
 
+from calibration_settings import DEFAULT_CALIBRATION_RANGE, CalibrationRange, format_number
 from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Border, PatternFill, Side
@@ -31,6 +32,7 @@ FILL_GOLD = PatternFill("solid", fgColor="FFD966")
 EXCEL_FILL_GREEN = 13561798
 EXCEL_FILL_ORANGE = 14083324
 EXCEL_FILL_GREY = 14277081
+EXCEL_FILL_RED = 13421823
 EXCEL_ICP_RANGE_FILL = 13693658
 
 warnings.filterwarnings(
@@ -138,24 +140,40 @@ def read_groups(source_ws) -> tuple[list[str], OrderedDict[str, list[dict[str, o
     return elements, groups
 
 
-def selected_index(ppb_values: list[float | None]) -> int | None:
-    indexed = [(idx, value) for idx, value in enumerate(ppb_values) if value is not None]
+def selected_index(
+    ppb_values: list[float | None],
+    dilution_values: list[float | None],
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
+) -> int | None:
+    indexed = [
+        (idx, value, dilution)
+        for idx, (value, dilution) in enumerate(zip(ppb_values, dilution_values))
+        if value is not None and dilution is not None
+    ]
     if not indexed:
         return None
 
-    valid_10_400 = [(idx, value) for idx, value in indexed if 10 <= value <= 400]
-    if valid_10_400:
-        return max(valid_10_400, key=lambda item: item[1])[0]
+    green_values = [
+        (idx, value, dilution)
+        for idx, value, dilution in indexed
+        if calibration_range.green_min <= value <= calibration_range.green_max
+    ]
+    if green_values:
+        return min(green_values, key=lambda item: item[2])[0]
 
-    valid_1_10 = [(idx, value) for idx, value in indexed if 1 <= value < 10]
-    if valid_1_10:
-        return max(valid_1_10, key=lambda item: item[1])[0]
+    orange_values = [
+        (idx, value, dilution)
+        for idx, value, dilution in indexed
+        if calibration_range.orange_min <= value < calibration_range.green_min
+    ]
+    if orange_values:
+        return min(orange_values, key=lambda item: item[2])[0]
 
-    if all(value < 1 for _, value in indexed):
-        return max(indexed, key=lambda item: item[1])[0]
+    if all(value < calibration_range.orange_min for _, value, _ in indexed):
+        return min(indexed, key=lambda item: item[2])[0]
 
-    if all(value > 400 for _, value in indexed):
-        return min(indexed, key=lambda item: item[1])[0]
+    if all(value > calibration_range.green_max for _, value, _ in indexed):
+        return max(indexed, key=lambda item: item[2])[0]
 
     return None
 
@@ -176,6 +194,7 @@ def write_sample_block(
     sample: str,
     rows: list[dict[str, object]],
     elements: list[str],
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
 ) -> tuple[int, list[int], tuple[int, int, int, int, int]]:
     title_row = start_row
     header_row = start_row + 1
@@ -221,9 +240,10 @@ def write_sample_block(
         output_ws.cell(selected_row, col).fill = FILL_GOLD
 
     ppb_by_element = list(zip(*[row["ppb_values"] for row in rows]))
+    dilution_values = [row["dilution"] for row in rows]
     for element_offset, ppb_values in enumerate(ppb_by_element):
         col = ELEMENT_START_COL + element_offset
-        selected_idx = selected_index(list(ppb_values))
+        selected_idx = selected_index(list(ppb_values), dilution_values, calibration_range)
         selected_cell = output_ws.cell(selected_row, col)
         copy_cell_style(source_ws.cell(HEADER_ROW, col), selected_cell)
         selected_cell.fill = FILL_GOLD
@@ -251,6 +271,7 @@ def apply_excel_formatting(
     selection_sections: list[tuple[int, int, int, int, int]],
     first_col: int,
     last_col: int,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
 ) -> bool:
     workbook_literal = str(workbook_path.resolve()).replace("'", "''")
     sheet_literal = sheet_name.replace("'", "''")
@@ -258,6 +279,9 @@ def apply_excel_formatting(
     last_col_letter = get_column_letter(last_col)
     row_list = ",".join(str(row) for row in rows)
     section_list = ",".join(f"'{ppb_start},{ppb_end},{ppm_start},{ppm_end},{selected_row}'" for ppb_start, ppb_end, ppm_start, ppm_end, selected_row in selection_sections)
+    orange_min = format_number(calibration_range.orange_min)
+    green_min = format_number(calibration_range.green_min)
+    green_max = format_number(calibration_range.green_max)
 
     script = f"""
 $excel = $null
@@ -290,43 +314,49 @@ try {{
         $ppmEnd = [int]$parts[3]
         $selectedRow = [int]$parts[4]
         $ppbSectionRange = $sheet.Range('{first_col_letter}' + $ppbStart + ':{last_col_letter}' + $ppbEnd)
-        $ppbHighlightRule = $ppbSectionRange.FormatConditions.Add(1, 1, '=10', '=400')
+        $ppbHighlightRule = $ppbSectionRange.FormatConditions.Add(1, 1, '={green_min}', '={green_max}')
         $ppbHighlightRule.Interior.Color = {EXCEL_ICP_RANGE_FILL}
         for ($col = {first_col}; $col -le {last_col}; $col++) {{
             $colLetter = [string]$sheet.Cells.Item(1, $col).Address($false, $false)
             $colLetter = $colLetter -replace '1$', ''
             $ppbRange = $colLetter + '$' + $ppbStart + ':' + $colLetter + '$' + $ppbEnd
+            $dilutionRange = '$A$' + $ppbStart + ':$A$' + $ppbEnd
             $topPpbCell = $colLetter + $ppbStart
+            $topDilutionCell = '$A' + $ppbStart
             $ppmRange = $sheet.Range($colLetter + $ppmStart + ':' + $colLetter + $ppmEnd)
             $selectedCell = $sheet.Range($colLetter + $selectedRow)
 
-            $formulaGreen = '=AND(' + $topPpbCell + '>=10,' + $topPpbCell + '<=400,' + $topPpbCell + '=MAXIFS(' + $ppbRange + ',' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400"))'
+            $formulaGreen = '=AND(' + $topPpbCell + '>={green_min},' + $topPpbCell + '<={green_max},' + $topDilutionCell + '=MINIFS(' + $dilutionRange + ',' + $ppbRange + ',">={green_min}",' + $ppbRange + ',"<={green_max}"))'
             $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreen)
             $rule.Interior.Color = {EXCEL_FILL_GREEN}
 
-            $formulaOrange = '=AND(COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")=0,' + $topPpbCell + '>=1,' + $topPpbCell + '<10,' + $topPpbCell + '=MAXIFS(' + $ppbRange + ',' + $ppbRange + ',">=1",' + $ppbRange + ',"<10"))'
+            $formulaOrange = '=AND(COUNTIFS(' + $ppbRange + ',">={green_min}",' + $ppbRange + ',"<={green_max}")=0,' + $topPpbCell + '>={orange_min},' + $topPpbCell + '<{green_min},' + $topDilutionCell + '=MINIFS(' + $dilutionRange + ',' + $ppbRange + ',">={orange_min}",' + $ppbRange + ',"<{green_min}"))'
             $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaOrange)
             $rule.Interior.Color = {EXCEL_FILL_ORANGE}
 
-            $formulaGreyLow = '=AND(MAX(' + $ppbRange + ')<1,' + $topPpbCell + '=MAX(' + $ppbRange + '))'
+            $formulaGreyLow = '=AND(MAX(' + $ppbRange + ')<{orange_min},' + $topDilutionCell + '=MIN(' + $dilutionRange + '))'
             $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreyLow)
             $rule.Interior.Color = {EXCEL_FILL_GREY}
 
-            $formulaGreyHigh = '=AND(MIN(' + $ppbRange + ')>400,' + $topPpbCell + '=MIN(' + $ppbRange + '))'
-            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaGreyHigh)
-            $rule.Interior.Color = {EXCEL_FILL_GREY}
+            $formulaRedHigh = '=AND(MIN(' + $ppbRange + ')>{green_max},' + $topDilutionCell + '=MAX(' + $dilutionRange + '))'
+            $rule = $ppmRange.FormatConditions.Add(2, [Type]::Missing, $formulaRedHigh)
+            $rule.Interior.Color = {EXCEL_FILL_RED}
 
-            $formulaSelectedGreen = '=COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")>0'
+            $formulaSelectedGreen = '=COUNTIFS(' + $ppbRange + ',">={green_min}",' + $ppbRange + ',"<={green_max}")>0'
             $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedGreen)
             $rule.Interior.Color = {EXCEL_FILL_GREEN}
 
-            $formulaSelectedOrange = '=AND(COUNTIFS(' + $ppbRange + ',">=10",' + $ppbRange + ',"<=400")=0,COUNTIFS(' + $ppbRange + ',">=1",' + $ppbRange + ',"<10")>0)'
+            $formulaSelectedOrange = '=AND(COUNTIFS(' + $ppbRange + ',">={green_min}",' + $ppbRange + ',"<={green_max}")=0,COUNTIFS(' + $ppbRange + ',">={orange_min}",' + $ppbRange + ',"<{green_min}")>0)'
             $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedOrange)
             $rule.Interior.Color = {EXCEL_FILL_ORANGE}
 
-            $formulaSelectedGrey = '=OR(MAX(' + $ppbRange + ')<1,MIN(' + $ppbRange + ')>400)'
+            $formulaSelectedGrey = '=MAX(' + $ppbRange + ')<{orange_min}'
             $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedGrey)
             $rule.Interior.Color = {EXCEL_FILL_GREY}
+
+            $formulaSelectedRed = '=MIN(' + $ppbRange + ')>{green_max}'
+            $rule = $selectedCell.FormatConditions.Add(2, [Type]::Missing, $formulaSelectedRed)
+            $rule.Interior.Color = {EXCEL_FILL_RED}
         }}
     }}
     $workbook.Save()
@@ -381,6 +411,7 @@ def apply_openpyxl_formatting_fallback(
     selection_sections,
     first_col: int,
     last_col: int,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
 ) -> bool:
     wb = load_workbook(workbook_path)
     ws = wb[sheet_name]
@@ -390,6 +421,7 @@ def apply_openpyxl_formatting_fallback(
     green_fill = PatternFill("solid", fgColor="C6EFCE")
     orange_fill = PatternFill("solid", fgColor="F4B183")
     grey_fill = PatternFill("solid", fgColor="D9D9D9")
+    red_fill = PatternFill("solid", fgColor="F4CCCC")
     selected_fill = PatternFill("solid", fgColor="FFD966")
     
     data_bar_rule = DataBarRule(
@@ -406,7 +438,10 @@ def apply_openpyxl_formatting_fallback(
                 cell = ws.cell(row=row, column=col)
                 value = cell.value
 
-                if isinstance(value, (int, float)) and 10 <= value <= 400:
+                if (
+                    isinstance(value, (int, float))
+                    and calibration_range.green_min <= value <= calibration_range.green_max
+                ):
                     cell.fill = green_fill
                     
             start = f"{get_column_letter(first_col)}{row}"
@@ -425,27 +460,36 @@ def apply_openpyxl_formatting_fallback(
             ppb_values = []
             for r in range(ppb_start, ppb_end + 1):
                 val = ws.cell(row=r, column=col).value
-                if isinstance(val, (int, float)):
-                    ppb_values.append((r, val))
+                dilution = parse_number(ws.cell(row=r, column=1).value)
+                if isinstance(val, (int, float)) and dilution is not None:
+                    ppb_values.append((r, val, dilution))
 
             if not ppb_values:
                 continue
 
-            valid_10_400 = [(r, v) for r, v in ppb_values if 10 <= v <= 400]
-            valid_1_10 = [(r, v) for r, v in ppb_values if 1 <= v < 10]
+            green_values = [
+                (r, v, dilution)
+                for r, v, dilution in ppb_values
+                if calibration_range.green_min <= v <= calibration_range.green_max
+            ]
+            orange_values = [
+                (r, v, dilution)
+                for r, v, dilution in ppb_values
+                if calibration_range.orange_min <= v < calibration_range.green_min
+            ]
 
-            if valid_10_400:
-                chosen_row, _ = max(valid_10_400, key=lambda x: x[1])
+            if green_values:
+                chosen_row, _, _ = min(green_values, key=lambda x: x[2])
                 fill = green_fill
-            elif valid_1_10:
-                chosen_row, _ = max(valid_1_10, key=lambda x: x[1])
+            elif orange_values:
+                chosen_row, _, _ = min(orange_values, key=lambda x: x[2])
                 fill = orange_fill
-            elif all(v < 1 for _, v in ppb_values):
-                chosen_row, _ = max(ppb_values, key=lambda x: x[1])
+            elif all(v < calibration_range.orange_min for _, v, _ in ppb_values):
+                chosen_row, _, _ = min(ppb_values, key=lambda x: x[2])
                 fill = grey_fill
-            elif all(v > 400 for _, v in ppb_values):
-                chosen_row, _ = min(ppb_values, key=lambda x: x[1])
-                fill = grey_fill
+            elif all(v > calibration_range.green_max for _, v, _ in ppb_values):
+                chosen_row, _, _ = max(ppb_values, key=lambda x: x[2])
+                fill = red_fill
             else:
                 continue
 
@@ -470,7 +514,12 @@ def apply_openpyxl_formatting_fallback(
     return True
 
 
-def build_concentration_workbook(source_path: Path, output_path: Path, source_sheet_name: str | None = None) -> None:
+def build_concentration_workbook(
+    source_path: Path,
+    output_path: Path,
+    source_sheet_name: str | None = None,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
+) -> None:
     source_wb = load_workbook(source_path, data_only=False)
     resolved_source_sheet = resolve_source_sheet(source_wb, source_sheet_name)
     source_ws = source_wb[resolved_source_sheet]
@@ -489,7 +538,15 @@ def build_concentration_workbook(source_path: Path, output_path: Path, source_sh
     data_bar_rows: list[int] = []
     selection_sections: list[tuple[int, int, int, int, int]] = []
     for sample, rows in groups.items():
-        current_row, block_data_bar_rows, section = write_sample_block(output_ws, source_ws, current_row, sample, rows, elements)
+        current_row, block_data_bar_rows, section = write_sample_block(
+            output_ws,
+            source_ws,
+            current_row,
+            sample,
+            rows,
+            elements,
+            calibration_range,
+        )
         data_bar_rows.extend(block_data_bar_rows)
         selection_sections.append(section)
 
@@ -502,6 +559,7 @@ def build_concentration_workbook(source_path: Path, output_path: Path, source_sh
             selection_sections,
             ELEMENT_START_COL,
             ELEMENT_START_COL + len(elements) - 1,
+            calibration_range,
         )
     else:
         excel_formatting_applied = apply_openpyxl_formatting_fallback(
@@ -511,6 +569,7 @@ def build_concentration_workbook(source_path: Path, output_path: Path, source_sh
             selection_sections,
             ELEMENT_START_COL,
             ELEMENT_START_COL + len(elements) - 1,
+            calibration_range,
         )
 
     print(f"Concentration workbook saved: {output_path}")
@@ -528,9 +587,17 @@ def main() -> int:
         "--sheet",
         help='Source ICP sheet name, such as "SH ICP", "T ICP", or "H ICP". If omitted, the only "* ICP" sheet is used.',
     )
+    parser.add_argument("--orange-min", type=float, default=DEFAULT_CALIBRATION_RANGE.orange_min, help="Minimum ppb for the orange lower-confidence calibration range.")
+    parser.add_argument("--green-min", type=float, default=DEFAULT_CALIBRATION_RANGE.green_min, help="Minimum ppb for the green accurate calibration range.")
+    parser.add_argument("--green-max", type=float, default=DEFAULT_CALIBRATION_RANGE.green_max, help="Maximum ppb for the green accurate calibration range.")
     args = parser.parse_args()
 
-    build_concentration_workbook(args.source, args.output, args.sheet)
+    calibration_range = CalibrationRange(
+        orange_min=args.orange_min,
+        green_min=args.green_min,
+        green_max=args.green_max,
+    )
+    build_concentration_workbook(args.source, args.output, args.sheet, calibration_range)
     return 0
 
 

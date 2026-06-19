@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 import argparse
 import re
@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Iterable, NamedTuple
 
 import pandas as pd
+from calibration_settings import DEFAULT_CALIBRATION_RANGE, DEFAULT_HIGHLIGHT_THRESHOLDS, CalibrationRange, HighlightThresholds, format_number
 from excel_backend import excel_backend
 from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import DataBarRule, CellIsRule
@@ -44,28 +45,12 @@ PROCESSED_HEADER_ROW = 1
 PROCESSED_SUBHEADER_ROW = 2
 PROCESSED_DATA_START_ROW = 3
 
-CONC_LABEL_PATTERN = re.compile(r"^conc\.(?:\s*\[.*\])?$", re.IGNORECASE)
+MEASURED_CONC_LABEL_PATTERN = re.compile(r"^(?:meas\.|measured)\s*conc\.(?:\s*\[.*\])?$", re.IGNORECASE)
 
-HIGHLIGHT_FILLS = {
-    "10-400": PatternFill("solid", fgColor="C6EFCE"),  # light green
-}
 EXCEL_ICP_RANGE_FILL = 13693658
 
-INTERNAL_STANDARD_FILLS = [
-    (10, PatternFill("solid", fgColor="FCE4D6")),  # lighter 80% orange
-    (20, PatternFill("solid", fgColor="F8CBAD")),  # lighter 60% orange
-    (30, PatternFill("solid", fgColor="F4B183")),  # lighter 40% orange
-    (40, PatternFill("solid", fgColor="ED7D31")),  # darker 25% orange
-    (50, PatternFill("solid", fgColor="C65911")),  # darker 50% orange
-]
-
-BLANK_STANDARD_FILLS = [
-    (0.1, PatternFill("solid", fgColor="FCE4D6")),  # lighter 80% orange
-    (0.2, PatternFill("solid", fgColor="F8CBAD")),  # lighter 60% orange
-    (0.3, PatternFill("solid", fgColor="F4B183")),  # lighter 40% orange
-    (0.4, PatternFill("solid", fgColor="ED7D31")),  # darker 25% orange
-    (0.5, PatternFill("solid", fgColor="C65911")),  # darker 50% orange
-]
+FILL_ORANGE = PatternFill("solid", fgColor="F4B183")
+FILL_DARK_ORANGE = PatternFill("solid", fgColor="C65911")
 
 
 class ElementBlock(NamedTuple):
@@ -97,7 +82,7 @@ def normalize_sample_initials(value: str | None) -> str:
 
 
 def sample_name_pattern(sample_initials: str) -> re.Pattern[str]:
-    return re.compile(rf"^{re.escape(sample_initials)}\d+$", re.IGNORECASE)
+    return re.compile(rf"^{re.escape(sample_initials)}_?[A-Za-z0-9]+$", re.IGNORECASE)
 
 
 def sample_sheet_name(sample_initials: str) -> str:
@@ -245,9 +230,9 @@ def discover_element_blocks(headers: list[str], subheaders: list[str], last_col:
             # concentration columns for cleaned analyte tables.
             continue
 
-        conc_offsets = [offset for offset, label in enumerate(group) if CONC_LABEL_PATTERN.match(label)]
+        conc_offsets = [offset for offset, label in enumerate(group) if MEASURED_CONC_LABEL_PATTERN.match(label)]
         if not conc_offsets:
-            errors.append(f"Element {element_name} has no concentration subheader in its 3-column group.")
+            errors.append(f"Element {element_name} has no measured concentration subheader in its 3-column group.")
             continue
         if len(conc_offsets) > 1:
             errors.append(f"Element {element_name} has multiple concentration-like subheaders in its group: {group}.")
@@ -276,8 +261,8 @@ def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationRes
 
     if not any(headers):
         errors.append("Row 1 does not contain element names.")
-    if not any(CONC_LABEL_PATTERN.match(label) for label in subheaders):
-        errors.append('Row 2 does not contain repeated subheaders including "Conc.".')
+    if not any(MEASURED_CONC_LABEL_PATTERN.match(label) for label in subheaders):
+        errors.append('Row 2 does not contain repeated subheaders including "Measured Conc.".')
     if PROCESSED_TABLE_START_COL != 4:
         errors.append("Processed table start column is not configured as column D.")
 
@@ -290,7 +275,10 @@ def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationRes
         sh_mask = sample_values.str.match(sample_name_pattern(sample_initials), na=False)
         sh_row_indices = sample_values[sh_mask].index.tolist()
         if not sh_row_indices:
-            errors.append(f'No {sample_initials} sample rows found. Expected sample names matching pattern "{sample_initials}[number]".')
+            errors.append(
+                f'No {sample_initials} sample rows found. Expected names such as '
+                f'"{sample_initials}1", "{sample_initials}_10k", or "{sample_initials}_x10k".'
+            )
 
     element_blocks, block_errors = discover_element_blocks(headers, subheaders, last_col)
     errors.extend(block_errors)
@@ -367,39 +355,51 @@ def prepare_sheet(wb: Workbook, sheet_name: str) -> object:
     return wb.create_sheet(sheet_name)
 
 
-def fill_for_percent_error(value: float | None, nominal: float | None) -> PatternFill | None:
+def fill_for_percent_error(
+    value: float | None,
+    nominal: float | None,
+    highlight_thresholds: HighlightThresholds = DEFAULT_HIGHLIGHT_THRESHOLDS,
+) -> PatternFill | None:
     """Return the orange fill for errors beyond relative-error thresholds."""
 
     if value is None or nominal is None:
         return None
     percent_error = abs(value - nominal) / abs(nominal) * 100
-    selected_fill = None
-    for threshold, fill in INTERNAL_STANDARD_FILLS:
-        if percent_error > threshold:
-            selected_fill = fill
-    return selected_fill
+    if percent_error > highlight_thresholds.internal_orange:
+        return FILL_DARK_ORANGE
+    if percent_error > highlight_thresholds.internal_light_orange:
+        return FILL_ORANGE
+    return None
 
 
-def fill_for_blank_standard(value: float | None) -> PatternFill | None:
+def fill_for_blank_standard(
+    value: float | None,
+    highlight_thresholds: HighlightThresholds = DEFAULT_HIGHLIGHT_THRESHOLDS,
+) -> PatternFill | None:
     """Return the orange fill for blank values beyond absolute thresholds."""
 
     if value is None:
         return None
 
     absolute_value = abs(value)
-    selected_fill = None
-    for threshold, fill in BLANK_STANDARD_FILLS:
-        if absolute_value > threshold:
-            selected_fill = fill
-    return selected_fill
+    if absolute_value > highlight_thresholds.blank_orange:
+        return FILL_DARK_ORANGE
+    if absolute_value > highlight_thresholds.blank_light_orange:
+        return FILL_ORANGE
+    return None
 
 
-def highlight_internal_standard_rows(cleaned_ws, sample_output_col: int, element_start_col: int) -> int:
+def highlight_internal_standard_rows(
+    cleaned_ws,
+    sample_output_col: int,
+    element_start_col: int,
+    highlight_thresholds: HighlightThresholds = DEFAULT_HIGHLIGHT_THRESHOLDS,
+) -> int:
     """Highlight ppb/blank standard rows in a cleaned concentration worksheet.
 
     For rows whose Sample Name contains a nominal ppb value, analyte concentration
-    cells are colored only when they exceed relative-error thresholds. Blank/blk
-    rows use absolute concentration thresholds of 0.1 through 0.5 ppb.
+    cells are colored by relative-error thresholds. Blank/blk rows use absolute
+    concentration thresholds.
     """
 
     highlighted_count = 0
@@ -414,7 +414,11 @@ def highlight_internal_standard_rows(cleaned_ws, sample_output_col: int, element
         for col_idx in range(element_start_col, cleaned_ws.max_column + 1):
             cell = cleaned_ws.cell(row_idx, col_idx)
             value = parse_number(cell.value)
-            fill = fill_for_blank_standard(value) if blank_row else fill_for_percent_error(value, nominal_ppb)
+            fill = (
+                fill_for_blank_standard(value, highlight_thresholds)
+                if blank_row
+                else fill_for_percent_error(value, nominal_ppb, highlight_thresholds)
+            )
             if fill is not None:
                 cell.fill = fill
                 highlighted_count += 1
@@ -448,7 +452,7 @@ def write_cleaned_table(
     for element_offset, block in enumerate(validation.element_blocks):
         out_col = PROCESSED_TABLE_START_COL + element_offset
         processed_ws.cell(PROCESSED_HEADER_ROW, out_col, element_symbol(block.name))
-        processed_ws.cell(PROCESSED_SUBHEADER_ROW, out_col, "Conc. [ ppb ]")
+        processed_ws.cell(PROCESSED_SUBHEADER_ROW, out_col, "Measured Conc. [ ppb ]")
 
     data = df.loc[list(row_indices)].copy()
     for out_row_offset, (source_row_idx, row) in enumerate(data.iterrows(), start=PROCESSED_DATA_START_ROW):
@@ -521,7 +525,15 @@ def create_icp_sheet_from_samples(wb: Workbook, samples_ws, sheet_name: str):
     return icp_ws
 
 
-def apply_excel_automatic_data_bars(workbook_path: Path, sheet_name: str, first_row: int, last_row: int, first_col: int, last_col: int) -> bool:
+def apply_excel_automatic_data_bars(
+    workbook_path: Path,
+    sheet_name: str,
+    first_row: int,
+    last_row: int,
+    first_col: int,
+    last_col: int,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
+) -> bool:
     """Use Excel COM to set row-wise data bars to Excel's Automatic min/max.
 
     Openpyxl can create data bars, but its public API exposes min/max threshold
@@ -534,6 +546,8 @@ def apply_excel_automatic_data_bars(workbook_path: Path, sheet_name: str, first_
     sheet_literal = sheet_name.replace("'", "''")
     first_col_letter = get_column_letter(first_col)
     last_col_letter = get_column_letter(last_col)
+    green_min = format_number(calibration_range.green_min)
+    green_max = format_number(calibration_range.green_max)
     # Excel constants: xlConditionValueAutomatic = 7.
     script = f"""
 $excel = $null
@@ -560,7 +574,7 @@ try {{
         $bar.ShowValue = $true
     }}
     $highlightRange = $sheet.Range('{first_col_letter}{first_row}:{last_col_letter}{last_row}')
-    $rule = $highlightRange.FormatConditions.Add(1, 1, '=10', '=400')
+    $rule = $highlightRange.FormatConditions.Add(1, 1, '={green_min}', '={green_max}')
     $rule.Interior.Color = {EXCEL_ICP_RANGE_FILL}
     $workbook.Save()
     exit 0
@@ -593,6 +607,7 @@ def apply_openpyxl_data_bars_fallback(
     last_row: int,
     first_col: int,
     last_col: int,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
 ) -> bool:
     wb = load_workbook(workbook_path)
     ws = wb[sheet_name]
@@ -622,12 +637,15 @@ def apply_openpyxl_data_bars_fallback(
         # Data bars
         ws.conditional_formatting.add(cell_range, data_bar_rule)
 
-        # 10–400 highlight
+        # Accurate calibration-range highlight
         ws.conditional_formatting.add(
             cell_range,
             CellIsRule(
                 operator="between",
-                formula=["10", "400"],
+                formula=[
+                    format_number(calibration_range.green_min),
+                    format_number(calibration_range.green_max),
+                ],
                 fill=green_fill
             )
         )
@@ -643,7 +661,14 @@ def default_output_path(input_path: Path, sample_initials: str) -> Path:
     return input_path.with_name(f"{input_path.stem}_highlighted_{sample_initials}_samples{suffix}")
 
 
-def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str | int | None, sample_initials: str) -> int:
+def process_icp_file(
+    input_path: Path,
+    output_path: Path | None,
+    sheet_name: str | int | None,
+    sample_initials: str,
+    calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
+    highlight_thresholds: HighlightThresholds = DEFAULT_HIGHLIGHT_THRESHOLDS,
+) -> int:
     """Validate, process, save, and print a concise run summary."""
 
     df = load_input_dataframe(input_path, sheet_name)
@@ -667,6 +692,7 @@ def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str
         highlighted_ws,
         sample_output_col=PROCESSED_TABLE_START_COL - 1,
         element_start_col=PROCESSED_TABLE_START_COL,
+        highlight_thresholds=highlight_thresholds,
     )
     processed_ws = write_cleaned_table(wb, raw_sheet_name, df, validation, sample_sheet_name(sample_initials), validation.sh_row_indices)
     icp_ws = create_icp_sheet_from_samples(wb, processed_ws, icp_sheet_name(sample_initials))
@@ -681,6 +707,7 @@ def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str
             last_row=icp_ws.max_row,
             first_col=PROCESSED_TABLE_START_COL,
             last_col=icp_ws.max_column,
+            calibration_range=calibration_range,
         )
     else:
         automatic_bars_applied = apply_openpyxl_data_bars_fallback(
@@ -690,6 +717,7 @@ def process_icp_file(input_path: Path, output_path: Path | None, sheet_name: str
             last_row=icp_ws.max_row,
             first_col=PROCESSED_TABLE_START_COL,
             last_col=icp_ws.max_column,
+            calibration_range=calibration_range,
         )
 
     print(f"Processed element count: {len(validation.element_blocks)}")
@@ -725,8 +753,15 @@ def main() -> int:
     parser.add_argument(
         "--initials",
         default=DEFAULT_SAMPLE_INITIALS,
-        help='Sample-name prefix to keep, such as "SH", "T", or "H". Defaults to SH.',
+        help='Sample-name prefix to keep, such as "SH", "T", "H", or "CS". Defaults to SH.',
     )
+    parser.add_argument("--orange-min", type=float, default=DEFAULT_CALIBRATION_RANGE.orange_min, help="Minimum ppb for the orange lower-confidence calibration range.")
+    parser.add_argument("--green-min", type=float, default=DEFAULT_CALIBRATION_RANGE.green_min, help="Minimum ppb for the green accurate calibration range.")
+    parser.add_argument("--green-max", type=float, default=DEFAULT_CALIBRATION_RANGE.green_max, help="Maximum ppb for the green accurate calibration range.")
+    parser.add_argument("--internal-light-orange", type=float, default=DEFAULT_HIGHLIGHT_THRESHOLDS.internal_light_orange, help="Internal-standard percent-error tolerance before orange highlighting.")
+    parser.add_argument("--internal-orange", type=float, default=DEFAULT_HIGHLIGHT_THRESHOLDS.internal_orange, help="Internal-standard percent-error threshold for orange; higher values use dark orange.")
+    parser.add_argument("--blank-light-orange", type=float, default=DEFAULT_HIGHLIGHT_THRESHOLDS.blank_light_orange, help="Blank-sample ppb tolerance before orange highlighting.")
+    parser.add_argument("--blank-orange", type=float, default=DEFAULT_HIGHLIGHT_THRESHOLDS.blank_orange, help="Blank-sample ppb threshold for orange; higher values use dark orange.")
     args = parser.parse_args()
 
     if not args.input.exists():
@@ -734,7 +769,25 @@ def main() -> int:
         return 1
 
     try:
-        return process_icp_file(args.input, args.output, parse_sheet_arg(args.sheet), normalize_sample_initials(args.initials))
+        calibration_range = CalibrationRange(
+            orange_min=args.orange_min,
+            green_min=args.green_min,
+            green_max=args.green_max,
+        )
+        highlight_thresholds = HighlightThresholds(
+            internal_light_orange=args.internal_light_orange,
+            internal_orange=args.internal_orange,
+            blank_light_orange=args.blank_light_orange,
+            blank_orange=args.blank_orange,
+        )
+        return process_icp_file(
+            args.input,
+            args.output,
+            parse_sheet_arg(args.sheet),
+            normalize_sample_initials(args.initials),
+            calibration_range,
+            highlight_thresholds,
+        )
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1

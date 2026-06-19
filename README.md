@@ -3,7 +3,7 @@
 Python tools and a Streamlit app for processing fixed-template ICP export files into cleaned Excel workbooks and final concentration summaries.
 
 Author: Shihua Han  
-Version: 0.2.0  
+Version: 0.4.0  
 
 ---
 
@@ -229,10 +229,10 @@ pip install pandas openpyxl
 The raw ICP file should follow the expected template layout:
 
 - Row 1 contains element names
-- Row 2 contains repeated subheaders, including `Conc.`
+- Row 2 contains repeated subheaders, including `Meas. Conc. [ ppb ]` or `Measured Conc. [ ppb ]`
 - Each element uses a repeating 3-column group
 - The sample name column is present in the raw data
-- Sample names use a prefix followed by a number, such as `SH1`, `T20`, `H43`, or `CS4`
+- Sample names use a prefix followed by letters or numbers, with an optional underscore, such as `SH1`, `T20`, `H43`, `CS4`, `CS_10k`, or `CS_x10k`
 
 ## Step 1: Process Raw ICP Data
 
@@ -259,6 +259,13 @@ python process_icp_data.py "raw_icp_data.xlsx" --sheet "Raw Data" --initials SH 
 ```
 
 Use quotes around file or sheet names that contain spaces.
+
+To customize the calibration ranges from the command line, pass the same values to both scripts:
+
+```bash
+python process_icp_data.py "raw_icp_data.csv" --initials CS --orange-min 1 --green-min 10 --green-max 400 --internal-light-orange 20 --internal-orange 40 --blank-light-orange 0.2 --blank-orange 1 --output "CS_processed.xlsx"
+python generate_icp_concentrations.py --source "CS_processed.xlsx" --orange-min 1 --green-min 10 --green-max 400 --output "CS_concentrations.xlsx"
+```
 
 ## Output From Step 1
 
@@ -299,11 +306,9 @@ Cells are highlighted when the relative error is beyond these thresholds:
 
 | Relative error | Fill color |
 | --- | --- |
-| >10% | light orange |
-| >20% | orange |
-| >30% | darker orange |
+| <=20% | no fill |
+| >20% to <=40% | orange |
 | >40% | dark orange |
-| >50% | darkest orange |
 
 ### Blank Samples
 
@@ -313,15 +318,13 @@ Cells are highlighted when values exceed these absolute concentration thresholds
 
 | Value | Fill color |
 | --- | --- |
-| >0.1 ppb | light orange |
-| >0.2 ppb | orange |
-| >0.3 ppb | darker orange |
-| >0.4 ppb | dark orange |
-| >0.5 ppb | darkest orange |
+| <=0.2 ppb | no fill |
+| >0.2 to <=1 ppb | orange |
+| >1 ppb | dark orange |
 
 ### ICP Concentration Range
 
-In the `<initials> ICP` sheet, element concentration cells between `10` and `400` ppb are highlighted using Excel conditional formatting.
+In the `<initials> ICP` sheet, element concentration cells in the accurate calibration range are highlighted using Excel conditional formatting. The default accurate range is `10` to `400` ppb.
 
 Each row also receives Excel data bars across the element columns:
 
@@ -370,10 +373,15 @@ For each element in each sample group, the script selects one final concentratio
 
 Selection priority:
 
-1. If any ICP value is between `10` and `400` ppb, select the concentration corresponding to the highest ICP value in that range.
-2. Otherwise, if any ICP value is between `1` and `10` ppb, select the concentration corresponding to the highest ICP value in that range.
-3. Otherwise, if all ICP values are `<1` ppb, select the concentration corresponding to the maximum ICP value.
-4. Otherwise, if all ICP values are `>400` ppb, select the concentration corresponding to the minimum ICP value.
+1. If any ICP value is in the green accurate range, select the concentration corresponding to the lowest dilution factor in that range.
+2. Otherwise, if any ICP value is in the orange lower-confidence range, select the concentration corresponding to the lowest dilution factor in that range.
+3. Otherwise, if all ICP values are below the orange minimum, select the concentration corresponding to the lowest dilution factor.
+4. Otherwise, if all ICP values are above the green maximum, select the concentration corresponding to the highest dilution factor.
+
+The Streamlit app exposes these values in **Advanced settings**. Defaults are:
+
+- Orange lower-confidence range: `1` ppb to below `10` ppb
+- Green accurate range: `10` ppb through `400` ppb
 
 ## Highlighting Rules in Step 2
 
@@ -381,10 +389,10 @@ The concentration workbook uses Excel conditional formatting:
 
 | Condition | Fill color |
 | --- | --- |
-| Selected from 10-400 ppb range | light green |
-| Selected from 1-10 ppb range | light orange |
-| All values <1 ppb | light gray |
-| All values >400 ppb | light gray |
+| Selected from green accurate range | light green |
+| Selected from orange lower-confidence range | light orange |
+| All values below orange minimum | light gray |
+| All values above green maximum | light red |
 | Final selected concentration row | gold base fill |
 
 Copied ICP ppb rows and calculated ppm rows also receive row-wise Excel data bars across the element columns.
