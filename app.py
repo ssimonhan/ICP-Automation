@@ -116,16 +116,26 @@ if uploaded_file and st.button("Step 1: Generate ICP Sheet"):
         mid_path = Path(tmp_mid.name)
         tmp_mid.close()
 
-        process_icp_file(
+        result_code = process_icp_file(
             input_path=input_path,
             output_path=mid_path,
             sheet_name=None,
             sample_initials=sample_initials,
             calibration_range=calibration_range,
             highlight_thresholds=highlight_thresholds,
+            source_name=uploaded_file.name,
         )
 
         os.remove(input_path)
+
+        if result_code != 0:
+            if mid_path.exists():
+                os.remove(mid_path)
+            st.session_state.mid_path = None
+            st.session_state.pop("cleaned_file", None)
+            st.session_state.pop("final_file", None)
+            st.error("ICP worksheet layout validation failed. Please check the messages above and the raw export format.")
+            st.stop()
 
     # Save path
     st.session_state.mid_path = str(mid_path)

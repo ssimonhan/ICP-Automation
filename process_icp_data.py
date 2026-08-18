@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import re
@@ -188,57 +188,47 @@ def element_symbol(element_name: str) -> str:
 
 
 def discover_element_blocks(headers: list[str], subheaders: list[str], last_col: int) -> tuple[list[ElementBlock], list[str]]:
-    """Validate and return repeating 3-column element groups.
+    """Validate and return element measured-concentration columns.
 
-    The raw export has metadata columns first, then every element occupies three
-    columns. The concentration column is identified by its subheader rather than
-    blindly taking a fixed offset, which catches template drift before processing.
+    Raw ICP exports can vary in group width. Instead of assuming every element
+    occupies exactly three columns, locate each ``Meas. Conc.`` subheader and
+    associate it with the nearest element name to its left in row 1.
     """
 
     errors: list[str] = []
     blocks: list[ElementBlock] = []
 
-    # The first element group starts at the first nonblank row-1 header after the
-    # metadata area. In the supplied ICP export this is column H.
-    first_element_col = next((idx for idx, value in enumerate(headers) if idx > 0 and value), None)
-    if first_element_col is None:
-        errors.append("Row 1 does not contain any element names after the metadata columns.")
+    measured_conc_cols = [
+        idx
+        for idx, label in enumerate(subheaders[: last_col + 1])
+        if MEASURED_CONC_LABEL_PATTERN.match(label)
+    ]
+    if not measured_conc_cols:
+        errors.append('No measured concentration columns found in row 2; expected "Meas. Conc." or "Measured Conc.".')
         return blocks, errors
 
-    group_width = 3
-    element_region_width = last_col - first_element_col + 1
-    if element_region_width <= 0 or element_region_width % group_width != 0:
-        errors.append(
-            "Element columns do not form complete repeating 3-column groups "
-            f"from column {get_column_letter(first_element_col + 1)} through "
-            f"{get_column_letter(last_col + 1)}."
+    for conc_col_idx in measured_conc_cols:
+        element_start_col_idx = next(
+            (idx for idx in range(conc_col_idx, -1, -1) if headers[idx]),
+            None,
         )
+        excel_col = get_column_letter(conc_col_idx + 1)
 
-    for start in range(first_element_col, last_col + 1, group_width):
-        group = subheaders[start : start + group_width]
-        element_name = headers[start]
-        excel_col = get_column_letter(start + 1)
+        if element_start_col_idx is None:
+            errors.append(f"Measured concentration column {excel_col} has no element name to its left in row 1.")
+            continue
 
-        if not element_name:
-            errors.append(f"Missing element name in row 1 at column {excel_col}.")
-            continue
-        if len(group) < group_width:
-            errors.append(f"Incomplete 3-column group for {element_name} starting at column {excel_col}.")
-            continue
+        element_name = headers[element_start_col_idx]
+        group = subheaders[element_start_col_idx : conc_col_idx + 1]
         if "ISTD" in element_name.upper() or any("ISTD RECOVERY" in label.upper() for label in group):
             # Internal-standard groups are instrument QC fields, not analyte
             # concentration columns for cleaned analyte tables.
             continue
 
-        conc_offsets = [offset for offset, label in enumerate(group) if MEASURED_CONC_LABEL_PATTERN.match(label)]
-        if not conc_offsets:
-            errors.append(f"Element {element_name} has no measured concentration subheader in its 3-column group.")
-            continue
-        if len(conc_offsets) > 1:
-            errors.append(f"Element {element_name} has multiple concentration-like subheaders in its group: {group}.")
-            continue
+        blocks.append(ElementBlock(element_name, element_start_col_idx, conc_col_idx))
 
-        blocks.append(ElementBlock(element_name, start, start + conc_offsets[0]))
+    if not blocks:
+        errors.append("No analyte measured concentration columns were found after excluding internal-standard fields.")
 
     return blocks, errors
 
@@ -262,7 +252,7 @@ def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationRes
     if not any(headers):
         errors.append("Row 1 does not contain element names.")
     if not any(MEASURED_CONC_LABEL_PATTERN.match(label) for label in subheaders):
-        errors.append('Row 2 does not contain repeated subheaders including "Measured Conc.".')
+        errors.append('Row 2 does not contain repeated subheaders including "Meas. Conc." or "Measured Conc.".')
     if PROCESSED_TABLE_START_COL != 4:
         errors.append("Processed table start column is not configured as column D.")
 
@@ -307,7 +297,11 @@ def load_input_dataframe(path: Path, sheet_name: str | int | None) -> pd.DataFra
     return pd.read_excel(path, sheet_name=sheet_name or 0, header=None, dtype=object, engine="openpyxl")
 
 
-def load_or_create_workbook(path: Path, sheet_name: str | int | None) -> tuple[Workbook, str, bool]:
+def load_or_create_workbook(
+    path: Path,
+    sheet_name: str | int | None,
+    source_name: str | None = None,
+) -> tuple[Workbook, str, bool]:
     """Open an Excel workbook or create one from CSV data.
 
     Returns the workbook, source sheet name, and whether the source was CSV.
@@ -316,7 +310,8 @@ def load_or_create_workbook(path: Path, sheet_name: str | int | None) -> tuple[W
     if path.suffix.lower() == ".csv":
         wb = Workbook()
         ws = wb.active
-        ws.title = safe_sheet_name(path.stem)
+        displayed_source_name = Path(source_name).stem if source_name else path.stem
+        ws.title = safe_sheet_name(displayed_source_name)
         csv_df = pd.read_csv(path, header=None, dtype=object, keep_default_na=False)
         for row in csv_df.itertuples(index=False, name=None):
             ws.append(list(row))
@@ -668,8 +663,13 @@ def process_icp_file(
     sample_initials: str,
     calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
     highlight_thresholds: HighlightThresholds = DEFAULT_HIGHLIGHT_THRESHOLDS,
+    source_name: str | None = None,
 ) -> int:
-    """Validate, process, save, and print a concise run summary."""
+    """Validate, process, save, and print a concise run summary.
+
+    ``source_name`` supplies a user-facing filename when ``input_path`` is a
+    temporary upload file.
+    """
 
     df = load_input_dataframe(input_path, sheet_name)
     validation = validate_raw_layout(df, sample_initials)
@@ -684,8 +684,14 @@ def process_icp_file(
                 print(f"- {element}")
         return 1
 
-    wb, raw_sheet_name, _ = load_or_create_workbook(input_path, sheet_name)
-    highlighted_sheet_name = safe_sheet_name(f"{input_path.stem} highlighted")
+    wb, raw_sheet_name, _ = load_or_create_workbook(input_path, sheet_name, source_name)
+    displayed_source_name = Path(source_name).stem if source_name else input_path.stem
+    highlighted_suffix = " highlighted"
+    # Excel sheet names are limited to 31 characters. Reserve room for the
+    # suffix so long upload names still clearly identify this sheet's purpose.
+    highlighted_sheet_name = safe_sheet_name(
+        f"{displayed_source_name[:31 - len(highlighted_suffix)]}{highlighted_suffix}"
+    )
     all_data_row_indices = range(RAW_DATA_START_ROW - 1, len(df))
     highlighted_ws = write_cleaned_table(wb, raw_sheet_name, df, validation, highlighted_sheet_name, all_data_row_indices)
     highlighted_count = highlight_internal_standard_rows(

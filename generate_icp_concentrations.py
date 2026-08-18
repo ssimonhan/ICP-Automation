@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import re
