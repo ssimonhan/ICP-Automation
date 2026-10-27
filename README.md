@@ -3,7 +3,7 @@
 Python tools and a Streamlit app for processing fixed-template ICP export files into cleaned Excel workbooks and final concentration summaries.
 
 Author: Shihua Han  
-Version: 0.4.1  
+Version: 0.4.2  
 
 ---
 
@@ -115,7 +115,8 @@ Ctrl + C
 #### Step 1 — Upload raw ICP file
 - Accepts .csv or .xlsx
 - Generates a cleaned ICP workbook
-- Optional: download intermediate cleaned file
+- Provides an optional cleaned download named
+  `<initials>_ICP_cleaned_YYYYMMDD.xlsx`
 
 #### Step 2 — Edit data in-app
 - Editable table appears
@@ -126,7 +127,11 @@ Ctrl + C
 
 #### Step 3 — Generate final results
 - Runs concentration calculations automatically
-- Produces final Excel workbook
+- Produces a merged final Excel workbook named
+  `<initials>_ICP_results_YYYYMMDD.xlsx`
+
+For both downloads, `YYYYMMDD` comes from a recognized date in the uploaded
+filename when present; otherwise, it uses the date the tool is run.
 
 No manual Excel editing required
 
@@ -135,17 +140,23 @@ No manual Excel editing required
 ### Outputs
 
 #### Intermediate output (optional)
-- Cleaned ICP workbook
+- Dated cleaned ICP workbook: `<initials>_ICP_cleaned_YYYYMMDD.xlsx`
 - Includes:
   - raw data
   - cleaned data
   - <initials> ICP sheet
 
 #### Final output
-- Concentration workbook:
+- Dated final workbook: `<initials>_ICP_results_YYYYMMDD.xlsx`
+- Complete processed ICP workbook, including the raw, cleaned, and
+  `<initials> ICP` sheets
+- User-entered Dilution and Sample values retained on the `<initials> ICP` sheet
+- Added `ICP concentrations` worksheet with:
   - grouped by sample
   - ppm calculations
   - selected final concentrations
+- Added `ICP summary` worksheet with one selected-concentration row
+  per sample for quick review
 
 ---
 
@@ -212,7 +223,7 @@ The workflow uses:
   Validates a raw ICP export, extracts sample and element concentration columns, highlights standards/blanks, and creates an editable ICP workbook.
 
 - `generate_icp_concentrations.py`  
-  Uses the edited ICP workbook to calculate original-solution concentrations in ppm and select one concentration per element.
+  Uses the edited ICP workbook to calculate original-solution concentrations in ppm, select one concentration per element, and append the `ICP concentrations` and `ICP summary` worksheets.
 
 ## Requirements
 
@@ -230,9 +241,13 @@ The raw ICP file should follow the expected template layout:
 
 - Row 1 contains element names
 - Row 2 contains repeated subheaders, including `Meas. Conc. [ ppb ]` or `Measured Conc. [ ppb ]`
-- Each element uses a repeating 3-column group
+- Measured-concentration columns are identified from the row-2 subheaders; the
+  export does not need fixed three-column element blocks
 - The sample name column is present in the raw data
 - Sample names use a prefix followed by letters or numbers, with an optional underscore, such as `SH1`, `T20`, `H43`, `CS4`, `CS_10k`, or `CS_x10k`
+
+Blank spacer rows before or between the element-header and subheader rows, as
+well as between data rows, are supported.
 
 ## Step 1: Process Raw ICP Data
 
@@ -367,6 +382,11 @@ c(ppm) = c(ppb) / 1000 * dilution factor
 
 The calculated ppm rows are written below the copied ppb rows.
 
+The final workbook keeps all sheets from the processed workbook and appends:
+
+- `ICP concentrations`, with detailed ppb, ppm, and selected rows for each sample
+- `ICP summary`, with one selected-concentration row per sample
+
 ## Concentration Selection Rules
 
 For each element in each sample group, the script selects one final concentration based on the ICP ppb values.
@@ -399,7 +419,13 @@ Copied ICP ppb rows and calculated ppm rows also receive row-wise Excel data bar
 
 ## Notes
 
-- Keep input filenames reasonably short if possible. Excel sheet names are limited to 31 characters, and very long filenames may require shortened sheet names.
+- Input layout is validated before an output workbook is opened or saved. If
+  validation fails, processing stops cleanly without creating an invalid
+  temporary workbook.
+- Generated raw and highlighted worksheet names use the original uploaded
+  filename, not the internal temporary upload filename. Excel sheet names are
+  limited to 31 characters; long highlighted names are shortened while keeping
+  the ` highlighted` suffix.
 - Close the workbook before rerunning a script that writes to it.
 - Missing concentration values in selected sample rows are reported as warnings and left blank.
 - If Excel automation is unavailable, the workbook is still created, but native Excel data bars or some conditional formatting may not be applied.

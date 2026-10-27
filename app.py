@@ -1,8 +1,9 @@
 import streamlit as st
 import tempfile
 import os
+import re
+from datetime import date
 from pathlib import Path
-from io import BytesIO
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -11,6 +12,72 @@ from calibration_settings import CalibrationRange, HighlightThresholds
 from process_icp_data import normalize_sample_initials, process_icp_file
 from generate_icp_concentrations import build_concentration_workbook
 from excel_backend import excel_backend
+
+
+MONTH_NUMBERS = {
+    "jan": 1, "january": 1,
+    "feb": 2, "february": 2,
+    "mar": 3, "march": 3,
+    "apr": 4, "april": 4,
+    "may": 5,
+    "jun": 6, "june": 6,
+    "jul": 7, "july": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10,
+    "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+MONTH_PATTERN = "|".join(MONTH_NUMBERS)
+
+
+def date_from_filename(filename: str) -> str | None:
+    """Return a YYYYMMDD date found in an uploaded filename, if present."""
+
+    stem = Path(filename).stem
+    numeric_patterns = (
+        r"(?<!\d)(?P<year>20\d{2})(?P<month>0[1-9]|1[0-2])(?P<day>0[1-9]|[12]\d|3[01])(?!\d)",
+        r"(?<!\d)(?P<year>20\d{2})[_. -](?P<month>0[1-9]|1[0-2])[_. -](?P<day>0[1-9]|[12]\d|3[01])(?!\d)",
+    )
+    for pattern in numeric_patterns:
+        match = re.search(pattern, stem)
+        if match:
+            try:
+                return date(**{field: int(value) for field, value in match.groupdict().items()}).strftime("%Y%m%d")
+            except ValueError:
+                continue
+
+    written_date = re.search(
+        rf"(?<!\d)(?P<day>0?[1-9]|[12]\d|3[01])[_. -]*(?P<month>{MONTH_PATTERN})[_. -]*(?P<year>20\d{{2}})(?!\d)",
+        stem,
+        flags=re.IGNORECASE,
+    )
+    if written_date:
+        groups = written_date.groupdict()
+        try:
+            return date(
+                int(groups["year"]),
+                MONTH_NUMBERS[groups["month"].lower()],
+                int(groups["day"]),
+            ).strftime("%Y%m%d")
+        except ValueError:
+            pass
+    return None
+
+
+def final_download_filename(sample_initials: str, uploaded_filename: str) -> str:
+    """Return the final workbook download name with an upload or run date."""
+
+    output_date = date_from_filename(uploaded_filename) or date.today().strftime("%Y%m%d")
+    return f"{sample_initials}_ICP_results_{output_date}.xlsx"
+
+
+def cleaned_download_filename(sample_initials: str, uploaded_filename: str) -> str:
+    """Return the cleaned workbook download name with an upload or run date."""
+
+    output_date = date_from_filename(uploaded_filename) or date.today().strftime("%Y%m%d")
+    return f"{sample_initials}_ICP_cleaned_{output_date}.xlsx"
+
 
 st.set_page_config(page_title="ICP Automation", layout="wide")
 
@@ -139,6 +206,7 @@ if uploaded_file and st.button("Step 1: Generate ICP Sheet"):
 
     # Save path
     st.session_state.mid_path = str(mid_path)
+    st.session_state.source_filename = uploaded_file.name
 
     # Store file bytes persistently
     with open(mid_path, "rb") as f:
@@ -153,7 +221,10 @@ if "cleaned_file" in st.session_state:
     st.download_button(
         "⬇️ Download Cleaned ICP File",
         data=st.session_state.cleaned_file,
-        file_name=f"{initials}_ICP_cleaned.xlsx"
+        file_name=cleaned_download_filename(
+            sample_initials,
+            st.session_state.get("source_filename", ""),
+        )
     )
 
 # =========================
@@ -249,5 +320,8 @@ if "final_file" in st.session_state:
     st.download_button(
         "⬇️ Download Final Excel",
         data=st.session_state.final_file,
-        file_name="icp_results.xlsx"
+        file_name=final_download_filename(
+            sample_initials,
+            st.session_state.get("source_filename", ""),
+        )
     )

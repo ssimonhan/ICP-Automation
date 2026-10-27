@@ -17,7 +17,7 @@ Usage:
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 import argparse
 import re
@@ -35,10 +35,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 
-# Fixed template positions. Change these only if the lab template changes.
-HEADER_ROW = 1
-SUBHEADER_ROW = 2
-RAW_DATA_START_ROW = 3
+# Source header rows are discovered so blank spacer rows are supported.
 DEFAULT_SAMPLE_INITIALS = "SH"
 PROCESSED_TABLE_START_COL = 4  # Column D
 PROCESSED_HEADER_ROW = 1
@@ -68,6 +65,7 @@ class ValidationResult(NamedTuple):
     sample_name_col_idx: int | None
     element_blocks: list[ElementBlock]
     sh_row_indices: list[int]  # zero-based pandas row indices
+    data_start_row_idx: int = 0  # zero-based pandas row index
 
 
 def normalize_sample_initials(value: str | None) -> str:
@@ -162,7 +160,7 @@ def find_last_used_col(df: pd.DataFrame) -> int:
 
 
 def find_sample_name_column(subheaders: list[str]) -> int | None:
-    """Locate the Sample Name column from row 2 subheaders."""
+    """Locate the Sample Name column from the subheader row."""
 
     for idx, label in enumerate(subheaders):
         if label.lower() == "sample name":
@@ -192,7 +190,7 @@ def discover_element_blocks(headers: list[str], subheaders: list[str], last_col:
 
     Raw ICP exports can vary in group width. Instead of assuming every element
     occupies exactly three columns, locate each ``Meas. Conc.`` subheader and
-    associate it with the nearest element name to its left in row 1.
+    associate it with the nearest element name to its left in the header row.
     """
 
     errors: list[str] = []
@@ -204,7 +202,7 @@ def discover_element_blocks(headers: list[str], subheaders: list[str], last_col:
         if MEASURED_CONC_LABEL_PATTERN.match(label)
     ]
     if not measured_conc_cols:
-        errors.append('No measured concentration columns found in row 2; expected "Meas. Conc." or "Measured Conc.".')
+        errors.append('No measured concentration columns found in the subheader row; expected "Meas. Conc." or "Measured Conc.".')
         return blocks, errors
 
     for conc_col_idx in measured_conc_cols:
@@ -215,7 +213,7 @@ def discover_element_blocks(headers: list[str], subheaders: list[str], last_col:
         excel_col = get_column_letter(conc_col_idx + 1)
 
         if element_start_col_idx is None:
-            errors.append(f"Measured concentration column {excel_col} has no element name to its left in row 1.")
+            errors.append(f"Measured concentration column {excel_col} has no element name to its left in the header row.")
             continue
 
         element_name = headers[element_start_col_idx]
@@ -233,26 +231,63 @@ def discover_element_blocks(headers: list[str], subheaders: list[str], last_col:
     return blocks, errors
 
 
+def find_header_rows(df: pd.DataFrame, last_col: int) -> tuple[int, int] | None:
+    """Return the header and subheader row indices, allowing blank spacer rows."""
+
+    for subheader_row_idx in range(df.shape[0]):
+        subheaders = [
+            normalize_header(value)
+            for value in df.iloc[subheader_row_idx, : last_col + 1].tolist()
+        ]
+        if (
+            find_sample_name_column(subheaders) is None
+            or not any(MEASURED_CONC_LABEL_PATTERN.match(label) for label in subheaders)
+        ):
+            continue
+
+        # The element header is the closest populated row above the subheaders.
+        # This permits blank rows before or between the two header rows.
+        for header_row_idx in range(subheader_row_idx - 1, -1, -1):
+            headers = [
+                normalize_header(value)
+                for value in df.iloc[header_row_idx, : last_col + 1].tolist()
+            ]
+            if any(headers):
+                return header_row_idx, subheader_row_idx
+    return None
+
+
 def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationResult:
     """Validate the ICP worksheet before changing or saving anything."""
 
     errors: list[str] = []
     element_failures: list[str] = []
 
-    if df.shape[0] < 2:
-        return ValidationResult(False, ["Worksheet must contain at least two header rows."], [], None, [], [])
+    if df.empty:
+        return ValidationResult(False, ["Worksheet appears to be empty."], [], None, [], [])
 
     last_col = find_last_used_col(df)
     if last_col < 0:
         return ValidationResult(False, ["Worksheet appears to be empty."], [], None, [], [])
 
-    headers = [normalize_header(value) for value in df.iloc[HEADER_ROW - 1, : last_col + 1].tolist()]
-    subheaders = [normalize_header(value) for value in df.iloc[SUBHEADER_ROW - 1, : last_col + 1].tolist()]
+    header_rows = find_header_rows(df, last_col)
+    if header_rows is None:
+        return ValidationResult(
+            False,
+            [
+                'Could not locate paired element and subheader rows containing '
+                '"Sample Name" and "Meas. Conc." or "Measured Conc.".'
+            ],
+            [],
+            None,
+            [],
+            [],
+        )
 
-    if not any(headers):
-        errors.append("Row 1 does not contain element names.")
-    if not any(MEASURED_CONC_LABEL_PATTERN.match(label) for label in subheaders):
-        errors.append('Row 2 does not contain repeated subheaders including "Meas. Conc." or "Measured Conc.".')
+    header_row_idx, subheader_row_idx = header_rows
+    headers = [normalize_header(value) for value in df.iloc[header_row_idx, : last_col + 1].tolist()]
+    subheaders = [normalize_header(value) for value in df.iloc[subheader_row_idx, : last_col + 1].tolist()]
+
     if PROCESSED_TABLE_START_COL != 4:
         errors.append("Processed table start column is not configured as column D.")
 
@@ -261,7 +296,7 @@ def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationRes
         errors.append('Sample name column was not found in row 2; expected subheader "Sample Name".')
         sh_row_indices: list[int] = []
     else:
-        sample_values = df.iloc[RAW_DATA_START_ROW - 1 :, sample_name_col_idx].map(normalize_header)
+        sample_values = df.iloc[subheader_row_idx + 1 :, sample_name_col_idx].map(normalize_header)
         sh_mask = sample_values.str.match(sample_name_pattern(sample_initials), na=False)
         sh_row_indices = sample_values[sh_mask].index.tolist()
         if not sh_row_indices:
@@ -286,6 +321,7 @@ def validate_raw_layout(df: pd.DataFrame, sample_initials: str) -> ValidationRes
         sample_name_col_idx=sample_name_col_idx,
         element_blocks=element_blocks,
         sh_row_indices=sh_row_indices,
+        data_start_row_idx=subheader_row_idx + 1,
     )
 
 
@@ -692,7 +728,7 @@ def process_icp_file(
     highlighted_sheet_name = safe_sheet_name(
         f"{displayed_source_name[:31 - len(highlighted_suffix)]}{highlighted_suffix}"
     )
-    all_data_row_indices = range(RAW_DATA_START_ROW - 1, len(df))
+    all_data_row_indices = range(validation.data_start_row_idx, len(df))
     highlighted_ws = write_cleaned_table(wb, raw_sheet_name, df, validation, highlighted_sheet_name, all_data_row_indices)
     highlighted_count = highlight_internal_standard_rows(
         highlighted_ws,

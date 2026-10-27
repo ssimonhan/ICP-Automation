@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 __author__ = "Shihua Han"
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 import argparse
 import re
@@ -15,7 +15,7 @@ from pathlib import Path
 
 from calibration_settings import DEFAULT_CALIBRATION_RANGE, CalibrationRange, format_number
 from excel_backend import excel_backend
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
 from openpyxl.styles import Border, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import DataBarRule, CellIsRule
@@ -23,6 +23,7 @@ from openpyxl.formatting.rule import DataBarRule, CellIsRule
 
 DEFAULT_SOURCE_SHEET_NAME = "SH ICP"
 OUTPUT_SHEET_NAME = "ICP concentrations"
+SELECTED_CONCENTRATIONS_SHEET_NAME = "ICP summary"
 HEADER_ROW = 1
 DATA_START_ROW = 3
 ELEMENT_START_COL = 4
@@ -262,6 +263,38 @@ def write_sample_block(
     apply_outline_border(output_ws, selected_row, selected_row, 1, last_col)
     section = (ppb_start, ppb_start + len(rows) - 1, ppm_start, ppm_start + len(rows) - 1, selected_row)
     return selected_row + 2, data_bar_rows, section
+
+
+def write_selected_concentrations_summary(
+    summary_ws,
+    concentrations_ws,
+    selection_sections: list[tuple[int, int, int, int, int]],
+) -> None:
+    """Copy the concentration header and one selected row per sample."""
+
+    if not selection_sections:
+        return
+
+    header_row = selection_sections[0][0] - 1
+    for col in range(1, concentrations_ws.max_column + 1):
+        copy_cell(concentrations_ws.cell(header_row, col), summary_ws.cell(1, col))
+        summary_ws.column_dimensions[get_column_letter(col)].width = (
+            concentrations_ws.column_dimensions[get_column_letter(col)].width or 14
+        )
+
+    for output_row, (_, _, _, _, selected_row) in enumerate(selection_sections, start=2):
+        for col in range(1, concentrations_ws.max_column + 1):
+            source_cell = concentrations_ws.cell(selected_row, col)
+            target_cell = summary_ws.cell(output_row, col)
+            copy_cell(source_cell, target_cell)
+
+            # Concentration cells on the source row are formulas relative to
+            # that sheet. Point the summary at the original selected cells so
+            # formulas stay correct after being copied to a different sheet.
+            if col >= ELEMENT_START_COL and source_cell.value is not None:
+                target_cell.value = f"='{OUTPUT_SHEET_NAME}'!{source_cell.coordinate}"
+
+    summary_ws.freeze_panes = "D2"
 
 
 def apply_excel_formatting(
@@ -520,14 +553,25 @@ def build_concentration_workbook(
     source_sheet_name: str | None = None,
     calibration_range: CalibrationRange = DEFAULT_CALIBRATION_RANGE,
 ) -> None:
+    """Append the concentration summary to a processed ICP workbook.
+
+    The source workbook is retained intact, including any user-entered
+    Dilution factor and Sample values on its ``<initials> ICP`` sheet.
+    """
+
     source_wb = load_workbook(source_path, data_only=False)
     resolved_source_sheet = resolve_source_sheet(source_wb, source_sheet_name)
     source_ws = source_wb[resolved_source_sheet]
     elements, groups = read_groups(source_ws)
 
-    output_wb = Workbook()
-    output_ws = output_wb.active
-    output_ws.title = OUTPUT_SHEET_NAME
+    # Keep the processed workbook and append the final summary to it instead
+    # of producing a separate one-sheet workbook. Re-running the generator
+    # replaces the prior summary rather than creating numbered duplicates.
+    output_wb = source_wb
+    for sheet_name in (OUTPUT_SHEET_NAME, SELECTED_CONCENTRATIONS_SHEET_NAME):
+        if sheet_name in output_wb.sheetnames:
+            del output_wb[sheet_name]
+    output_ws = output_wb.create_sheet(OUTPUT_SHEET_NAME)
     output_ws.freeze_panes = "D3"
 
     for col_idx in range(1, source_ws.max_column + 1):
@@ -549,6 +593,13 @@ def build_concentration_workbook(
         )
         data_bar_rows.extend(block_data_bar_rows)
         selection_sections.append(section)
+
+    selected_summary_ws = output_wb.create_sheet(SELECTED_CONCENTRATIONS_SHEET_NAME)
+    write_selected_concentrations_summary(
+        selected_summary_ws,
+        output_ws,
+        selection_sections,
+    )
 
     output_wb.save(output_path)
     if excel_backend() == "windows":
