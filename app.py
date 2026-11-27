@@ -2,7 +2,9 @@ import streamlit as st
 import tempfile
 import os
 import re
+from collections import OrderedDict
 from datetime import date
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -11,6 +13,13 @@ from openpyxl import load_workbook
 from calibration_settings import CalibrationRange, HighlightThresholds
 from process_icp_data import normalize_sample_initials, process_icp_file
 from generate_icp_concentrations import build_concentration_workbook
+from recovery_calculations import (
+    ICPResults,
+    build_recovery_workbook,
+    calculate_recoveries,
+    parse_feed_concentrations,
+    read_selected_concentrations,
+)
 from excel_backend import excel_backend
 
 
@@ -79,7 +88,21 @@ def cleaned_download_filename(sample_initials: str, uploaded_filename: str) -> s
     return f"{sample_initials}_ICP_cleaned_{output_date}.xlsx"
 
 
+def recovery_download_filename(uploaded_filename: str) -> str:
+    """Return a dated recovery-workbook name based on the uploaded ICP results."""
+
+    initials_match = re.match(r"([A-Za-z]+)_ICP_results", Path(uploaded_filename).name)
+    initials = initials_match.group(1).upper() if initials_match else "ICP"
+    output_date = date_from_filename(uploaded_filename) or date.today().strftime("%Y%m%d")
+    return f"{initials}_recovery_{output_date}.xlsx"
+
+
 st.set_page_config(page_title="ICP Automation", layout="wide")
+
+analysis_tab, recovery_tab = st.tabs(["ICP Analysis", "Leaching Recovery"])
+
+# Keep the existing ICP workflow together in its own tab.
+analysis_tab.__enter__()
 
 st.title("🧪 ICP Automation Tool")
 
@@ -325,3 +348,197 @@ if "final_file" in st.session_state:
             st.session_state.get("source_filename", ""),
         )
     )
+
+analysis_tab.__exit__(None, None, None)
+
+with recovery_tab:
+    st.title("Leaching Recovery Calculator")
+    st.caption(
+        "Upload a final ICP results workbook, select a feed and leachate samples, "
+        "then calculate recovery by element."
+    )
+    st.info(
+        "If you edit selected concentrations in Excel, save the ICP results workbook "
+        "before uploading it here so the linked summary values are updated."
+    )
+    use_current_result = st.checkbox(
+        "Use the final ICP results generated in ICP Analysis",
+        value=False,
+        disabled="final_file" not in st.session_state,
+        help="Available after you generate final concentrations in the ICP Analysis tab.",
+        key="use_current_icp_result",
+    )
+    recovery_upload = None if use_current_result else st.file_uploader(
+        "Upload ICP results workbook",
+        type=["xlsx"],
+        key="recovery_upload",
+        help="Use a file named like [initials]_ICP_results_YYYYMMDD.xlsx.",
+    )
+    recovery_file_bytes = st.session_state.get("final_file") if use_current_result else (
+        recovery_upload.getvalue() if recovery_upload else None
+    )
+    recovery_source_filename = (
+        final_download_filename(sample_initials, st.session_state.get("source_filename", ""))
+        if use_current_result else recovery_upload.name if recovery_upload else ""
+    )
+
+    if recovery_file_bytes:
+        try:
+            icp_results = read_selected_concentrations(BytesIO(recovery_file_bytes))
+        except Exception as exc:
+            st.error(f"Could not read selected ICP concentrations: {exc}")
+        else:
+            samples = list(icp_results.sample_concentrations)
+            st.success(f"Loaded {len(samples)} samples and {len(icp_results.elements)} elements.")
+
+            feed_mode = st.radio(
+                "Feed concentration source",
+                ["Select a feed sample from ICP results", "Paste feed concentrations"],
+                horizontal=True,
+                key="feed_mode",
+            )
+            feed_sample = None
+            if feed_mode == "Select a feed sample from ICP results":
+                feed_sample = st.selectbox("Feed sample", samples, key="feed_sample")
+                feed_concentrations = dict(icp_results.sample_concentrations[feed_sample])
+            else:
+                feed_text = st.text_area(
+                    "Feed concentrations (ppm)",
+                    placeholder="Li\tFe\tNd\n19.7\t352411.6\t120.4",
+                    help="Paste two rows from Excel: element names first, concentrations second. Element=ppm is also supported.",
+                    key="feed_concentrations",
+                )
+                feed_concentrations = parse_feed_concentrations(feed_text, icp_results.elements)
+
+            default_samples = [sample for sample in samples if sample != feed_sample]
+            sample_column, parameter_column = st.columns(2)
+            with sample_column:
+                selected_samples = st.multiselect(
+                    "Leachate samples for recovery calculation",
+                    samples,
+                    default=default_samples,
+                    key="recovery_samples",
+                )
+            with parameter_column:
+                parameter_label = st.text_input(
+                    "Experiment parameter name",
+                    value="pH",
+                    key="recovery_parameter_label",
+                    help="For example: pH, temperature (°C), acid concentration, or leaching time (h).",
+                ).strip() or "Experiment parameter"
+            input_rows = [
+                {
+                    "Sample": sample,
+                    "Final volume (mL)": None,
+                    "Feed mass (g)": None,
+                    "Experiment parameter": None,
+                }
+                for sample in selected_samples
+            ]
+            st.subheader("Leachate inputs")
+            st.caption(f"Enter final volume, feed mass, and {parameter_label} for each selected leachate.")
+            input_df = st.data_editor(
+                pd.DataFrame(input_rows),
+                width="stretch",
+                hide_index=True,
+                disabled=["Sample"],
+                column_config={
+                    "Final volume (mL)": st.column_config.NumberColumn(
+                        min_value=0.0,
+                        step=0.01,
+                        format="%.2f",
+                    ),
+                    "Feed mass (g)": st.column_config.NumberColumn(
+                        min_value=0.0,
+                        step=0.0001,
+                        format="%.4f",
+                    ),
+                    "Experiment parameter": st.column_config.NumberColumn(
+                        label=parameter_label,
+                        step=0.01,
+                        format="%.2f",
+                    ),
+                },
+                key="recovery_input_table",
+            )
+
+            st.subheader("Elements for recovery summary and chart")
+            selected_elements = st.pills(
+                "Click elements to include",
+                icp_results.elements,
+                selection_mode="multi",
+                default=None,
+                key="recovery_elements",
+                help="Selected elements are used in the recovery summary and chart.",
+            )
+
+            if selected_samples and selected_elements:
+                sample_inputs = {
+                    row["Sample"]: {
+                        "volume_ml": row["Final volume (mL)"],
+                        "feed_mass_g": row["Feed mass (g)"],
+                        "parameter": row["Experiment parameter"],
+                    }
+                    for _, row in input_df.iterrows()
+                }
+                selected_results = ICPResults(
+                    icp_results.elements,
+                    OrderedDict(
+                        (sample, icp_results.sample_concentrations[sample])
+                        for sample in selected_samples
+                    ),
+                )
+                recoveries = calculate_recoveries(selected_results, feed_concentrations, sample_inputs)
+                preview_rows = []
+                for sample in selected_samples:
+                    preview_rows.append(
+                        {
+                            "Sample": sample,
+                            parameter_label: sample_inputs[sample]["parameter"],
+                            **{element: recoveries[sample][element] for element in selected_elements},
+                        }
+                    )
+                st.subheader("Recovery preview (%)")
+                st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
+
+                if st.button("Generate Recovery Workbook", key="generate_recovery"):
+                    missing_inputs = [
+                        sample for sample, values in sample_inputs.items()
+                        if values["volume_ml"] is None or values["feed_mass_g"] is None
+                        or values["volume_ml"] <= 0 or values["feed_mass_g"] <= 0
+                    ]
+                    missing_feed = [element for element in selected_elements if not feed_concentrations.get(element)]
+                    if missing_inputs:
+                        st.error("Enter a positive final volume and feed mass for: " + ", ".join(missing_inputs))
+                    elif missing_feed:
+                        st.error("Provide non-zero feed concentrations for: " + ", ".join(missing_feed))
+                    else:
+                        with st.spinner("Building recovery workbook..."):
+                            with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as output_file:
+                                output_path = Path(output_file.name)
+                            try:
+                                build_recovery_workbook(
+                                    output_path,
+                                    selected_results,
+                                    feed_concentrations,
+                                    sample_inputs,
+                                    parameter_label,
+                                    selected_elements,
+                                )
+                                st.session_state.recovery_file = output_path.read_bytes()
+                                st.session_state.recovery_source_filename = recovery_source_filename
+                            finally:
+                                if output_path.exists():
+                                    os.remove(output_path)
+
+                        st.success("Recovery workbook generated.")
+            else:
+                st.info("Select at least one leachate sample and one element to continue.")
+
+    if "recovery_file" in st.session_state:
+        st.download_button(
+            "Download Recovery Workbook",
+            data=st.session_state.recovery_file,
+            file_name=recovery_download_filename(st.session_state.get("recovery_source_filename", "")),
+            key="download_recovery",
+        )

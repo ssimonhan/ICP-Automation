@@ -3,7 +3,7 @@
 Python tools and a Streamlit app for processing fixed-template ICP export files into cleaned Excel workbooks and final concentration summaries.
 
 Author: Shihua Han  
-Version: 0.4.2  
+Version: 0.5.0  
 
 ---
 
@@ -18,6 +18,8 @@ A user-friendly web interface that:
 - Allows editing dilution/sample directly in-browser
 - Produces final concentration results
 - Eliminates manual Excel editing steps
+- Includes an independent **Leaching Recovery** tab for calculating elemental
+  recovery from a final ICP-results workbook
 
 This app is compatible with [Streamlit Cloud](https://icp-automation.streamlit.app/). Some advanced Excel formatting features (e.g., Excel-native automatic data bars) are simplified in cloud environments due to platform limitations, but all core data processing and outputs remain unchanged.
 
@@ -137,6 +139,47 @@ No manual Excel editing required
 
 ---
 
+### Leaching Recovery Workflow
+
+Use the **Leaching Recovery** tab independently after generating an
+`<initials>_ICP_results_YYYYMMDD.xlsx` workbook.
+
+If selected concentrations are edited in Excel, save the workbook before
+uploading it to the recovery tab so the formula-linked `ICP summary` values
+are updated.
+
+1. Upload the final ICP-results workbook.
+   When continuing from the **ICP Analysis** tab, users can instead select the
+   option to use its generated final ICP-results workbook directly.
+2. Select a feed sample from the workbook or paste feed concentrations in ppm.
+   Excel-style two-row data are supported: element names in the first row and
+   concentrations in the second row.
+3. Select the leachate samples to analyze.
+4. Enter the final volume (mL), feed mass (g), and an experiment parameter
+   value, such as pH, for each leachate sample.
+5. Select elements to include in the summary and recovery-versus-parameter
+   chart.
+
+For each element, the tool calculates:
+
+```text
+Recovery (%) = final volume (mL) × leachate concentration (ppm)
+               ÷ [feed mass (g) × feed concentration (ppm)] × 100
+```
+
+The download creates a new standalone recovery workbook with one
+`Recovery calculation` worksheet, rather than adding worksheets to the
+ICP-results workbook. It contains, in order:
+
+1. The feed concentrations as entered by the user
+2. Feed concentrations matched to leachate elements with `XLOOKUP`
+3. Leachate concentrations
+4. Formula-based recovery calculations
+5. An `XLOOKUP`-based selected-element summary and a recovery-versus-parameter
+   chart when the parameter values are numeric
+
+---
+
 ### Outputs
 
 #### Intermediate output (optional)
@@ -224,6 +267,9 @@ The workflow uses:
 
 - `generate_icp_concentrations.py`  
   Uses the edited ICP workbook to calculate original-solution concentrations in ppm, select one concentration per element, and append the `ICP concentrations` and `ICP summary` worksheets.
+
+- `recovery_calculations.py`  
+  Reads selected ICP concentrations and creates a new standalone leaching-recovery workbook.
 
 ## Requirements
 
