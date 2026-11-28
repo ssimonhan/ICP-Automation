@@ -3,7 +3,7 @@
 Python tools and a Streamlit app for processing fixed-template ICP export files into cleaned Excel workbooks and final concentration summaries.
 
 Author: Shihua Han  
-Version: 0.5.0  
+Version: 0.6.0
 
 ---
 
@@ -18,7 +18,7 @@ A user-friendly web interface that:
 - Allows editing dilution/sample directly in-browser
 - Produces final concentration results
 - Eliminates manual Excel editing steps
-- Includes an independent **Leaching Recovery** tab for calculating elemental
+- Includes an independent **Metal Recovery** tab for calculating elemental
   recovery from a final ICP-results workbook
 
 This app is compatible with [Streamlit Cloud](https://icp-automation.streamlit.app/). Some advanced Excel formatting features (e.g., Excel-native automatic data bars) are simplified in cloud environments due to platform limitations, but all core data processing and outputs remain unchanged.
@@ -139,9 +139,9 @@ No manual Excel editing required
 
 ---
 
-### Leaching Recovery Workflow
+### Metal Recovery Workflow
 
-Use the **Leaching Recovery** tab independently after generating an
+Use the **Metal Recovery** tab independently after generating an
 `<initials>_ICP_results_YYYYMMDD.xlsx` workbook.
 
 If selected concentrations are edited in Excel, save the workbook before
@@ -151,29 +151,49 @@ are updated.
 1. Upload the final ICP-results workbook.
    When continuing from the **ICP Analysis** tab, users can instead select the
    option to use its generated final ICP-results workbook directly.
-2. Select a feed sample from the workbook or paste feed concentrations in ppm.
-   Excel-style two-row data are supported: element names in the first row and
-   concentrations in the second row.
-3. Select the leachate samples to analyze.
-4. Enter the final volume (mL), feed mass (g), and an experiment parameter
-   value, such as pH, for each leachate sample.
-5. Select elements to include in the summary and recovery-versus-parameter
+2. Select a **Recovery Type** (Solid → Solid, Solid → Liquid, Liquid → Solid,
+   or Liquid → Liquid) and a **Measurement Basis** (Product Stream or Depleted
+   Stream).
+3. In **Feed concentrations**, select a feed sample from the workbook or paste
+   feed concentrations in ppm. Excel-style two-row data are supported: element
+   names in the first row and concentrations in the second row. When pasting,
+   enter a feed sample name for the recovery workbook.
+4. Drag samples between **Available samples** and the selected stream list,
+   which is labeled for the chosen stream type. Drag items within the selected
+   list to set their order. A selected feed sample is excluded by default.
+5. Enter the configured feed and stream mass/volume quantities, plus an
+   experiment parameter such as pH, for each selected stream.
+6. Select elements to include in the summary and recovery-versus-parameter
    chart.
 
-For each element, the tool calculates:
+For each element, the basis identifies the stream used as the measurement.
+Product Stream calculates recovery directly from the product (for example,
+organic phase). Depleted Stream calculates recovery from the remaining metal
+in the depleted stream (for example, barren aqueous solution), then reports
+the recovered fraction:
 
 ```text
-Recovery (%) = final volume (mL) × leachate concentration (ppm)
-               ÷ [feed mass (g) × feed concentration (ppm)] × 100
+Recovery calculated from Product Stream (%) =
+    product amount × product concentration
+    ÷ (feed amount × feed concentration) × 100
+
+Recovery calculated from Depleted Stream (%) =
+    100 - [depleted amount × depleted concentration
+           ÷ (feed amount × feed concentration) × 100]
 ```
+
+The mass or volume basis and corresponding input/workbook labels are configured
+for each Recovery Type. Existing leaching calculations are preserved by using
+**Solid → Liquid** with **Product Stream** (feed mass and final leachate volume).
 
 The download creates a new standalone recovery workbook with one
 `Recovery calculation` worksheet, rather than adding worksheets to the
 ICP-results workbook. It contains, in order:
 
-1. The feed concentrations as entered by the user
-2. Feed concentrations matched to leachate elements with `XLOOKUP`
-3. Leachate concentrations
+1. The feed sample name in the Sample column and the concentrations as entered
+   by the user (or selected from the ICP results workbook)
+2. Feed concentrations matched to ICP elements with `XLOOKUP`
+3. Selected product or depleted stream concentrations
 4. Formula-based recovery calculations
 5. An `XLOOKUP`-based selected-element summary and a recovery-versus-parameter
    chart when the parameter values are numeric
