@@ -1,7 +1,8 @@
 import streamlit as st
-import tempfile
+import hashlib
 import os
 import re
+import tempfile
 from collections import OrderedDict
 from datetime import date
 from io import BytesIO
@@ -9,15 +10,24 @@ from pathlib import Path
 
 import pandas as pd
 from openpyxl import load_workbook
+from streamlit_sortables import sort_items
 
 from calibration_settings import CalibrationRange, HighlightThresholds
 from process_icp_data import normalize_sample_initials, process_icp_file
 from generate_icp_concentrations import build_concentration_workbook
 from recovery_calculations import (
+    DEFAULT_RECOVERY_TYPE,
+    DEPLETED_STREAM,
     ICPResults,
+    MEASUREMENT_BASES,
+    PRODUCT_STREAM,
+    RECOVERY_TYPES,
     build_recovery_workbook,
     calculate_recoveries,
+    get_recovery_type_config,
     parse_feed_concentrations,
+    parse_number,
+    order_selected_elements,
     read_selected_concentrations,
 )
 from excel_backend import excel_backend
@@ -38,6 +48,36 @@ MONTH_NUMBERS = {
     "dec": 12, "december": 12,
 }
 MONTH_PATTERN = "|".join(MONTH_NUMBERS)
+SORTABLE_COMPACT_STYLE = """
+.sortable-component.vertical .sortable-container {
+    min-width: 150px;
+    padding: 4px;
+}
+.sortable-container-header {
+    padding: 2px 4px;
+    font-weight: 600;
+}
+.sortable-container-body {
+    display: flex;
+    flex-wrap: wrap;
+    align-content: flex-start;
+    gap: 4px;
+    min-height: 42px;
+    padding: 4px;
+}
+.sortable-component.vertical .sortable-item {
+    display: inline-flex;
+    width: fit-content;
+    max-width: 100%;
+    height: auto;
+    align-items: center;
+    margin: 0;
+    padding: 3px 8px;
+    border-radius: 14px;
+    font-size: 0.85rem;
+    line-height: 1.2;
+}
+"""
 
 
 def date_from_filename(filename: str) -> str | None:
@@ -99,7 +139,7 @@ def recovery_download_filename(uploaded_filename: str) -> str:
 
 st.set_page_config(page_title="ICP Automation", layout="wide")
 
-analysis_tab, recovery_tab = st.tabs(["ICP Analysis", "Leaching Recovery"])
+analysis_tab, recovery_tab = st.tabs(["ICP Analysis", "Metal Recovery"])
 
 # Keep the existing ICP workflow together in its own tab.
 analysis_tab.__enter__()
@@ -352,10 +392,10 @@ if "final_file" in st.session_state:
 analysis_tab.__exit__(None, None, None)
 
 with recovery_tab:
-    st.title("Leaching Recovery Calculator")
+    st.title("Metal Recovery Calculator")
     st.caption(
-        "Upload a final ICP results workbook, select a feed and leachate samples, "
-        "then calculate recovery by element."
+        "Upload a final ICP results workbook, configure the feed and stream types, "
+        "then calculate metal recovery by element."
     )
     st.info(
         "If you edit selected concentrations in Excel, save the ICP results workbook "
@@ -391,67 +431,177 @@ with recovery_tab:
             samples = list(icp_results.sample_concentrations)
             st.success(f"Loaded {len(samples)} samples and {len(icp_results.elements)} elements.")
 
-            feed_mode = st.radio(
-                "Feed concentration source",
-                ["Select a feed sample from ICP results", "Paste feed concentrations"],
-                horizontal=True,
-                key="feed_mode",
-            )
-            feed_sample = None
-            if feed_mode == "Select a feed sample from ICP results":
-                feed_sample = st.selectbox("Feed sample", samples, key="feed_sample")
-                feed_concentrations = dict(icp_results.sample_concentrations[feed_sample])
-            else:
-                feed_text = st.text_area(
-                    "Feed concentrations (ppm)",
-                    placeholder="Li\tFe\tNd\n19.7\t352411.6\t120.4",
-                    help="Paste two rows from Excel: element names first, concentrations second. Element=ppm is also supported.",
-                    key="feed_concentrations",
+            with st.container(border=True):
+                st.subheader("Recovery settings")
+                recovery_type_column, measurement_basis_column = st.columns(2)
+                with recovery_type_column:
+                    recovery_type = st.selectbox(
+                        "Recovery Type",
+                        RECOVERY_TYPES,
+                        index=RECOVERY_TYPES.index(DEFAULT_RECOVERY_TYPE),
+                        key="recovery_type",
+                        help=(
+                            "Choose the physical phases of the feed and the product stream. "
+                            "The first phase is the feed and the second is the product "
+                            "(for example, Solid → Liquid for leaching)."
+                        ),
+                    )
+                with measurement_basis_column:
+                    measurement_basis = st.radio(
+                        "Measurement Basis",
+                        MEASUREMENT_BASES,
+                        horizontal=True,
+                        key="recovery_measurement_basis",
+                        help=(
+                            "Product Stream calculates recovered metal directly from the product. "
+                            "Depleted Stream uses the remaining metal in the depleted stream and "
+                            "calculates 100% minus that fraction."
+                        ),
+                    )
+                st.caption(
+                    "Recovery (%) = recovered metal / feed metal × 100"
+                    if measurement_basis == PRODUCT_STREAM
+                    else "Recovery (%) = 100 - (remaining metal / feed metal × 100)"
                 )
-                feed_concentrations = parse_feed_concentrations(feed_text, icp_results.elements)
+            recovery_config = get_recovery_type_config(recovery_type)
+
+            with st.container(border=True):
+                st.subheader("Feed concentrations")
+                feed_mode = st.radio(
+                    "Feed concentration source",
+                    ["Select a feed sample from ICP results", "Paste feed concentrations"],
+                    horizontal=True,
+                    key="feed_mode",
+                )
+                feed_sample = None
+                if feed_mode == "Select a feed sample from ICP results":
+                    feed_sample = st.selectbox(
+                        recovery_config.ui_feed_sample_label,
+                        samples,
+                        key="feed_sample",
+                    )
+                    feed_sample_name = feed_sample
+                    feed_concentrations = dict(icp_results.sample_concentrations[feed_sample])
+                else:
+                    feed_sample_name = st.text_input(
+                        "Feed sample name",
+                        key="recovery_feed_sample_name",
+                        help="This name is recorded in the recovery workbook.",
+                    ).strip()
+
+                if feed_mode == "Paste feed concentrations":
+                    feed_text = st.text_area(
+                        recovery_config.ui_feed_concentrations_label,
+                        placeholder="Li\tFe\tNd\n19.7\t352411.6\t120.4",
+                        help="Paste two rows from Excel: element names first, concentrations second. Element=ppm is also supported.",
+                        key="feed_concentrations",
+                    )
+                    feed_concentrations = parse_feed_concentrations(feed_text, icp_results.elements)
 
             default_samples = [sample for sample in samples if sample != feed_sample]
-            sample_column, parameter_column = st.columns(2)
-            with sample_column:
-                selected_samples = st.multiselect(
-                    "Leachate samples for recovery calculation",
-                    samples,
-                    default=default_samples,
-                    key="recovery_samples",
+            sample_order_key = "recovery_sample_order_" + hashlib.sha256(
+                repr((samples, feed_sample)).encode("utf-8")
+            ).hexdigest()[:12]
+            selected_samples_header = (
+                f"{recovery_config.stream_samples_label(measurement_basis)} "
+                "for recovery calculation"
+            )
+            previous_sort = st.session_state.get(sample_order_key)
+            if previous_sort:
+                available_samples = [
+                    sample for sample in previous_sort[0]["items"] if sample in samples
+                ]
+                selected_samples = [
+                    sample for sample in previous_sort[1]["items"] if sample in samples
+                ]
+                assigned_samples = set(available_samples + selected_samples)
+                for sample in samples:
+                    if sample not in assigned_samples:
+                        if sample in default_samples:
+                            selected_samples.append(sample)
+                        else:
+                            available_samples.append(sample)
+            else:
+                selected_samples = list(default_samples)
+                available_samples = [
+                    sample for sample in samples if sample not in selected_samples
+                ]
+            selected_header_hash = hashlib.sha256(
+                selected_samples_header.encode("utf-8")
+            ).hexdigest()[:8]
+
+            with st.container(border=True):
+                st.subheader("Samples for recovery")
+                st.caption(
+                    f"{feed_sample_name} is excluded from recovery samples by default."
+                    if feed_sample
+                    else "All ICP samples are selected by default when feed concentrations are pasted."
                 )
-            with parameter_column:
-                parameter_label = st.text_input(
-                    "Experiment parameter name",
-                    value="pH",
-                    key="recovery_parameter_label",
-                    help="For example: pH, temperature (°C), acid concentration, or leaching time (h).",
-                ).strip() or "Experiment parameter"
+                sample_column, parameter_column = st.columns(2)
+                with sample_column:
+                    st.caption(
+                        f"Drag samples into or out of the selected list. "
+                        f"Reorder {recovery_config.stream_samples_label(measurement_basis).lower()} "
+                        "by dragging them within that list."
+                    )
+                    sortable_samples = sort_items(
+                        [
+                            {"header": "Available samples", "items": available_samples},
+                            {
+                                "header": selected_samples_header,
+                                "items": selected_samples,
+                            },
+                        ],
+                        multi_containers=True,
+                        direction="vertical",
+                        custom_style=SORTABLE_COMPACT_STYLE,
+                        key=f"recovery_samples_{sample_order_key}_{selected_header_hash}",
+                    )
+                    st.session_state[sample_order_key] = sortable_samples
+                    selected_samples = sortable_samples[1]["items"]
+                with parameter_column:
+                    parameter_label = st.text_input(
+                        "Experiment parameter name",
+                        value="pH",
+                        key="recovery_parameter_label",
+                        help="For example: pH, temperature (°C), acid concentration, or leaching time (h).",
+                    ).strip() or "Experiment parameter"
             input_rows = [
                 {
                     "Sample": sample,
-                    "Final volume (mL)": None,
-                    "Feed mass (g)": None,
+                    recovery_config.ui_feed_quantity_label: None,
+                    recovery_config.stream_quantity_label(measurement_basis, ui=True): None,
                     "Experiment parameter": None,
                 }
                 for sample in selected_samples
             ]
-            st.subheader("Leachate inputs")
-            st.caption(f"Enter final volume, feed mass, and {parameter_label} for each selected leachate.")
+            feed_quantity_label = recovery_config.ui_feed_quantity_label
+            stream_quantity_label = recovery_config.stream_quantity_label(measurement_basis, ui=True)
+            stream_basis = (
+                recovery_config.product_basis
+                if measurement_basis == PRODUCT_STREAM
+                else recovery_config.depleted_basis
+            )
+            st.subheader("Stream quantities")
+            st.caption(
+                f"Enter {feed_quantity_label.lower()}, {stream_quantity_label.lower()}, "
+                f"and {parameter_label} for each selected stream."
+            )
             input_df = st.data_editor(
                 pd.DataFrame(input_rows),
                 width="stretch",
                 hide_index=True,
                 disabled=["Sample"],
                 column_config={
-                    "Final volume (mL)": st.column_config.NumberColumn(
+                    feed_quantity_label: st.column_config.NumberColumn(
                         min_value=0.0,
-                        step=0.01,
-                        format="%.2f",
+                        step=0.0001 if recovery_config.feed_basis == "mass" else 0.01,
+                        format="%.4f" if recovery_config.feed_basis == "mass" else "%.2f",
                     ),
-                    "Feed mass (g)": st.column_config.NumberColumn(
+                    stream_quantity_label: st.column_config.NumberColumn(
                         min_value=0.0,
-                        step=0.0001,
-                        format="%.4f",
+                        step=0.0001 if stream_basis == "mass" else 0.01,
+                        format="%.4f" if stream_basis == "mass" else "%.2f",
                     ),
                     "Experiment parameter": st.column_config.NumberColumn(
                         label=parameter_label,
@@ -459,11 +609,14 @@ with recovery_tab:
                         format="%.2f",
                     ),
                 },
-                key="recovery_input_table",
+                key=(
+                    f"recovery_input_table_{RECOVERY_TYPES.index(recovery_type)}_"
+                    f"{MEASUREMENT_BASES.index(measurement_basis)}"
+                ),
             )
 
             st.subheader("Elements for recovery summary and chart")
-            selected_elements = st.pills(
+            selected_element_options = st.pills(
                 "Click elements to include",
                 icp_results.elements,
                 selection_mode="multi",
@@ -471,13 +624,17 @@ with recovery_tab:
                 key="recovery_elements",
                 help="Selected elements are used in the recovery summary and chart.",
             )
+            selected_elements = order_selected_elements(
+                icp_results.elements,
+                selected_element_options or [],
+            )
 
             if selected_samples and selected_elements:
                 sample_inputs = {
                     row["Sample"]: {
-                        "volume_ml": row["Final volume (mL)"],
-                        "feed_mass_g": row["Feed mass (g)"],
-                        "parameter": row["Experiment parameter"],
+                        "feed_quantity": parse_number(row[feed_quantity_label]),
+                        "stream_quantity": parse_number(row[stream_quantity_label]),
+                        "parameter": parse_number(row["Experiment parameter"]),
                     }
                     for _, row in input_df.iterrows()
                 }
@@ -488,7 +645,13 @@ with recovery_tab:
                         for sample in selected_samples
                     ),
                 )
-                recoveries = calculate_recoveries(selected_results, feed_concentrations, sample_inputs)
+                recoveries = calculate_recoveries(
+                    selected_results,
+                    feed_concentrations,
+                    sample_inputs,
+                    recovery_type,
+                    measurement_basis,
+                )
                 preview_rows = []
                 for sample in selected_samples:
                     preview_rows.append(
@@ -498,18 +661,24 @@ with recovery_tab:
                             **{element: recoveries[sample][element] for element in selected_elements},
                         }
                     )
-                st.subheader("Recovery preview (%)")
+                st.subheader(f"Recovery calculated from {measurement_basis} (%)")
                 st.dataframe(pd.DataFrame(preview_rows), width="stretch", hide_index=True)
 
                 if st.button("Generate Recovery Workbook", key="generate_recovery"):
                     missing_inputs = [
                         sample for sample, values in sample_inputs.items()
-                        if values["volume_ml"] is None or values["feed_mass_g"] is None
-                        or values["volume_ml"] <= 0 or values["feed_mass_g"] <= 0
+                        if values["feed_quantity"] is None or values["stream_quantity"] is None
+                        or values["feed_quantity"] <= 0 or values["stream_quantity"] < 0
                     ]
-                    missing_feed = [element for element in selected_elements if not feed_concentrations.get(element)]
+                    missing_feed = [
+                        element for element in selected_elements
+                        if feed_concentrations.get(element) in (None, 0)
+                    ]
                     if missing_inputs:
-                        st.error("Enter a positive final volume and feed mass for: " + ", ".join(missing_inputs))
+                        st.error(
+                            f"Enter a positive {feed_quantity_label.lower()} and a non-negative "
+                            f"{stream_quantity_label.lower()} for: " + ", ".join(missing_inputs)
+                        )
                     elif missing_feed:
                         st.error("Provide non-zero feed concentrations for: " + ", ".join(missing_feed))
                     else:
@@ -524,6 +693,9 @@ with recovery_tab:
                                     sample_inputs,
                                     parameter_label,
                                     selected_elements,
+                                    recovery_type,
+                                    measurement_basis,
+                                    feed_sample_name,
                                 )
                                 st.session_state.recovery_file = output_path.read_bytes()
                                 st.session_state.recovery_source_filename = recovery_source_filename
@@ -533,7 +705,7 @@ with recovery_tab:
 
                         st.success("Recovery workbook generated.")
             else:
-                st.info("Select at least one leachate sample and one element to continue.")
+                st.info("Select at least one stream sample and one element to continue.")
 
     if "recovery_file" in st.session_state:
         st.download_button(
